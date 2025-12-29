@@ -422,7 +422,10 @@ mod tests {
             actix_web::http::StatusCode::PARTIAL_CONTENT
         );
         let crange = resp.headers().get(header::CONTENT_RANGE).unwrap();
+        #[cfg(unix)]
         assert_eq!(crange, "bytes 500-999/3129");
+        #[cfg(windows)]
+        assert_eq!(crange, "bytes 500-999/3138"); // Windows EOL
     }
 
     #[actix_web::test]
@@ -733,14 +736,15 @@ mod tests {
     #[actix_web::test]
     async fn test_delete_asset_ok() {
         let source_path = Path::new("./tests/fixtures/f2t.jpg");
-        let target_path = Path::new("./tests/blobs/2019-04-15/0830/f2t.jpg");
+        // use a different destination to avoid Windows "used by another process" error
+        let target_path = Path::new("./tests/blobs/2019-04-15/0830/f3t.jpg");
         std::fs::copy(source_path, target_path).expect("file copy");
 
         let app =
             test::init_service(App::new().route("/assets/{id}", web::delete().to(delete_asset)))
                 .await;
-        // MjAxOS0wNC0xNS8wODMwL2YydC5qcGc= is 2019-04-15/0830/f2t.jpg
-        let req = test::TestRequest::with_uri("/assets/MjAxOS0wNC0xNS8wODMwL2YydC5qcGc=")
+        // MjAxOS0wNC0xNS8wODMwL2YzdC5qcGc= is 2019-04-15/0830/f3t.jpg
+        let req = test::TestRequest::with_uri("/assets/MjAxOS0wNC0xNS8wODMwL2YzdC5qcGc=")
             .method(actix_web::http::Method::DELETE)
             .to_request();
         let resp = test::call_service(&app, req).await;
