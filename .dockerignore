@@ -1,0 +1,13 @@
+.DS_Store
+.vscode
+
+# Rust build artifacts
+Cargo.lock
+target
+
+# environment configuration
+.env
+
+# temporary data
+tmp
+.tmp
