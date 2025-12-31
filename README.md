@@ -4,10 +4,11 @@ A simple blob server for use with [tanuki](https://github.com/nlfiedler/tanuki) 
 
 ## Features
 
-* Supports `GET`, `PUT`, and `DELETE` on assets identified by a base64-encoded path.
-* Provides a `/thumbnail` endpoint for producing JPEG-formatted thumbnails of images.
-* Generates a unique `ETag` value and responds to `If-None-Match` with a 304 to support browser caching.
-* Supports `Range` header and responds with a 206 which serves browser requests for video files.
+- Supports `GET`, `PUT`, and `DELETE` on assets identified by a base64-encoded path.
+- Stores files in the directory structure defined by the provided identifiers.
+- Provides a `/thumbnail` endpoint for producing JPEG-formatted thumbnails of images.
+- Generates a unique `ETag` value and responds to `If-None-Match` with a 304 to support browser caching.
+- Supports `Range` request header and responds with a 206 which benefits browser requests for video files.
 
 ## Configuration
 
@@ -22,7 +23,7 @@ A simple blob server for use with [tanuki](https://github.com/nlfiedler/tanuki) 
 
 ## Uploading files
 
-Files are uploaded using `multipart/form-data` via a `PUT` request to the `/assets/{id}` endpoint. The `{id}` is substituted with the base64-encoded path of the destination for the asset, including its destined filename. This can be done with `curl` as shown below.
+Files are uploaded via a `PUT` request to the `/assets/{id}` endpoint -- the body of the request is the file content. The `{id}` is substituted with the base64-encoded path of the destination for the asset, including its destined filename. This operation can be performed with the `curl` command, as shown below.
 
 The paths and names shown below are examples.
 
@@ -30,7 +31,7 @@ The paths and names shown below are examples.
 $ echo -n '2003-08-30/01kd0r0qa6p0s8g5nms0bb8m5p.jpg' | base64
 MjAwMy0wOC0zMC8wMWtkMHIwcWE2cDBzOGc1bm1zMGJiOG01cC5qcGc=
 
-$ curl -X PUT -F content=@tests/fixtures/f2t.jpg http://localhost:3000/assets/MjAwMy0wOC0zMC8wMWtkMHIwcWE2cDBzOGc1bm1zMGJiOG01cC5qcGc=
+$ curl -T tests/fixtures/f2t.jpg http://localhost:3000/assets/MjAwMy0wOC0zMC8wMWtkMHIwcWE2cDBzOGc1bm1zMGJiOG01cC5qcGc=
 HTTP/1.1 201 Created
 content-length: 0
 date: Mon, 29 Dec 2025 05:04:26 GMT
@@ -55,3 +56,7 @@ docker image rm 192.168.1.4:5000/namazu
 docker image tag namazu-app 192.168.1.4:5000/namazu
 docker push 192.168.1.4:5000/namazu
 ```
+
+## Origin of the name
+
+The [namazu](https://en.wikipedia.org/wiki/Namazu) is a mythical catfish of Japan that purportedly causes earthquakes. That has nothing to do with this project, but the name is short and easy to type.

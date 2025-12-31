@@ -2,8 +2,6 @@
 // Copyright (c) 2025 Nathan Fiedler
 //
 use actix_files::NamedFile;
-use actix_multipart::Multipart;
-use actix_web::error::PayloadError;
 use actix_web::http::header;
 use actix_web::{App, Either, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder, web};
 use anyhow::{Error, anyhow};
@@ -147,7 +145,7 @@ async fn get_thumbnail(req: HttpRequest) -> actix_web::Result<HttpResponse> {
                         .append_header((header::ETAG, etag))
                         .body(data)),
                     Err(_) => Ok(HttpResponse::TemporaryRedirect()
-                        .append_header((header::LOCATION, "public/placeholder.svg"))
+                        .append_header((header::LOCATION, "/public/placeholder.svg"))
                         .finish()),
                 }
             } else {
@@ -178,40 +176,41 @@ fn none_match(etag: &header::EntityTag, req: &HttpRequest) -> bool {
     }
 }
 
+// Receive the incoming file content as the body of the PUT request.
 async fn put_asset(
     info: web::Path<String>,
-    mut payload: Multipart,
+    mut payload: web::Payload,
 ) -> actix_web::Result<HttpResponse> {
-    use futures::{StreamExt, TryStreamExt};
+    use futures::StreamExt;
     use std::io::Write;
 
     if let Ok(filepath) = blob_path(&info) {
         if filepath.exists() {
             Ok(HttpResponse::Conflict().finish())
         } else {
-            // iterate over the fields until the file content is found
-            while let Ok(Some(mut field)) = payload.try_next().await {
-                let field_name = field.name().ok_or(PayloadError::EncodingCorrupted)?;
-                if field_name == "content" {
-                    // store the file content to the given path
-                    let fp_clone = filepath.clone();
-                    // file operations are blocking, use threadpool
-                    let mut f = web::block(move || {
-                        let parent_dir = fp_clone.parent().expect("no parent");
-                        std::fs::create_dir_all(parent_dir)?;
-                        std::fs::File::create(fp_clone)
-                    })
-                    .await??;
-                    // the field value is a stream of *Bytes* objects
-                    while let Some(chunk) = field.next().await {
-                        let data = chunk?;
-                        // file operations are blocking, use threadpool
-                        f = web::block(move || f.write_all(&data).map(|_| f)).await??;
-                    }
-                    // only one file is accepted and written to the path
-                    break;
-                }
+            // store the file content to the given path
+            let fp_clone = filepath.clone();
+            // file operations are blocking, use threadpool
+            let mut file = web::block(move || {
+                let parent_dir = fp_clone.parent().expect("no parent");
+                std::fs::create_dir_all(parent_dir)?;
+                std::fs::File::create(fp_clone)
+            })
+            .await??;
+            // the body is a stream of Bytes objects
+            while let Some(chunk) = payload.next().await {
+                let data = chunk?;
+                // file operations are blocking, use threadpool
+                file = web::block(move || file.write_all(&data).map(|_| file)).await??;
             }
+            // ensure file is readable by backup programs and the like
+            #[cfg(target_family = "unix")]
+            {
+                use std::fs::Permissions;
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&filepath, Permissions::from_mode(0o644))?;
+            }
+            info!("asset {} saved to {}", info, filepath.display());
             Ok(HttpResponse::Created().finish())
         }
     } else {
@@ -250,6 +249,11 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/liveness")
                     .route(web::get().to(HttpResponse::Ok))
                     .route(web::head().to(HttpResponse::Ok)),
+            )
+            .service(
+                actix_files::Files::new("/public", "./public")
+                    .use_etag(true)
+                    .use_last_modified(true),
             )
             .route("/thumbnail/{w}/{h}/{id}", web::get().to(get_thumbnail))
             .route("/assets/{id}", web::get().to(get_asset))
@@ -474,8 +478,29 @@ mod tests {
         assert!(resp.status().is_redirection());
         assert_eq!(
             resp.headers().get(header::LOCATION).unwrap(),
-            "public/placeholder.svg"
+            "/public/placeholder.svg"
         );
+    }
+
+    #[actix_web::test]
+    async fn test_placeholder_image() {
+        let app = test::init_service(
+            App::new().service(
+                actix_files::Files::new("/public", "./public")
+                    .use_etag(true)
+                    .use_last_modified(true),
+            ),
+        )
+        .await;
+        // MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA== is 2019-04-15/0830/lorem-ipsum.txt
+        let uri = "/public/placeholder.svg";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        assert_eq!(resp.status().as_u16(), actix_web::http::StatusCode::OK);
+        let ctype = resp.headers().get(header::CONTENT_TYPE).unwrap();
+        assert_eq!(ctype, "image/svg+xml");
+        // actix_files::Files does not return content-length header?
     }
 
     #[actix_web::test]
@@ -590,9 +615,17 @@ mod tests {
         );
     }
 
+    fn checksum_file(infile: &Path) -> std::io::Result<String> {
+        use sha2::{Digest, Sha256};
+        let mut file = std::fs::File::open(infile)?;
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut file, &mut hasher)?;
+        let digest = hasher.finalize();
+        Ok(format!("{:x}", digest))
+    }
+
     #[actix_web::test]
     async fn test_put_asset_ok() {
-        use std::io::Write;
         // clean up from previous failed runs
         let expected_path = Path::new("./tests/blobs/2019-04-15/0830/f2t.jpg");
         if expected_path.exists() {
@@ -602,39 +635,20 @@ mod tests {
         //
         // request should look something like this:
         //
-        // PUT /assets/BAES64PATH HTTP/1.1
-        // Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+        // PUT /assets/BASE64-ENCODED-PATH HTTP/1.1
+        // Content-Type: xxx/yyy
+        // Content-Length: nnn
         //
-        // ------WebKitFormBoundary7MA4YWxkTrZu0gW
-        // Content-Disposition: form-data; name="content"; filename="kittens.jpg"
-        // Content-Type: image/jpeg
-        //
-        // [Binary data of the JPEG file]
-        // ------WebKitFormBoundary7MA4YWxkTrZu0gW--
-        let boundary = "----WebKitFormBoundary0gYa4NfETro6nMot";
+        // [raw data of the incoming file]
         let app =
             test::init_service(App::new().route("/assets/{id}", web::put().to(put_asset))).await;
-        let ct_header = format!("multipart/form-data; boundary={}", boundary);
-        let filename = "./tests/fixtures/f2t.jpg";
-        let mut file = std::fs::File::open(filename).unwrap();
-        let mut payload: Vec<u8> = Vec::new();
-        let mut file_blob = String::from("--");
-        file_blob.push_str(boundary);
-        file_blob.push_str("\r\nContent-Disposition: form-data;");
-        file_blob.push_str(r#" name="content"; filename="ignored.ext""#);
-        file_blob.push_str("\r\nContent-Type: image/jpeg\r\n\r\n");
-        payload.write_all(file_blob.as_bytes()).unwrap();
-        std::io::copy(&mut file, &mut payload).unwrap();
-
-        let mut terminator = String::from("\r\n--");
-        terminator.push_str(boundary);
-        terminator.push_str("--\r\n");
-        payload.write_all(terminator.as_bytes()).unwrap();
+        let filepath = "./tests/fixtures/f2t.jpg";
+        let payload = std::fs::read(filepath).expect("file read");
 
         // MjAxOS0wNC0xNS8wODMwL2YydC5qcGc= is 2019-04-15/0830/f2t.jpg
         let req = test::TestRequest::with_uri("/assets/MjAxOS0wNC0xNS8wODMwL2YydC5qcGc=")
             .method(actix_web::http::Method::PUT)
-            .append_header((header::CONTENT_TYPE, ct_header))
+            .append_header((header::CONTENT_TYPE, "image/jpeg"))
             .append_header((header::CONTENT_LENGTH, payload.len()))
             .set_payload(payload)
             .to_request();
@@ -642,6 +656,11 @@ mod tests {
         assert!(resp.status().is_success());
         assert_eq!(resp.status().as_u16(), actix_web::http::StatusCode::CREATED);
         assert!(expected_path.exists());
+        let digest = checksum_file(expected_path).expect("checksum");
+        assert_eq!(
+            digest,
+            "c52b9501d1037c50c8d20969a36a888b71310ff90ee557f813330144d8377b18"
+        );
         std::fs::remove_file(expected_path).expect("delete file");
     }
 

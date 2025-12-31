@@ -20,3 +20,6 @@ futures = "0.3.31"
 image = "0.25.9"
 kamadak-exif = "0.6.1"
 log = "0.4.29"
+
+[dev-dependencies]
+sha2 = "0.10.9"
