@@ -233,6 +233,11 @@ async fn delete_asset(info: web::Path<String>) -> actix_web::Result<HttpResponse
     }
 }
 
+#[actix_web::get("favicon.ico")]
+async fn favicon() -> actix_web::Result<actix_files::NamedFile> {
+    Ok(actix_files::NamedFile::open("./public/favicon.ico")?)
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenvy::dotenv().ok();
@@ -255,6 +260,7 @@ async fn main() -> std::io::Result<()> {
                     .use_etag(true)
                     .use_last_modified(true),
             )
+            .service(favicon)
             .route("/thumbnail/{w}/{h}/{id}", web::get().to(get_thumbnail))
             .route("/assets/{id}", web::get().to(get_asset))
             .route("/assets/{id}", web::head().to(get_asset))
