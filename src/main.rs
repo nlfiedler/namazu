@@ -7,6 +7,7 @@ use actix_web::{App, Either, HttpMessage, HttpRequest, HttpResponse, HttpServer,
 use anyhow::{Error, anyhow};
 use base64::{Engine as _, engine::general_purpose};
 use log::info;
+use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -36,6 +37,19 @@ fn blob_path(encoded: &str) -> Result<PathBuf, Error> {
     let mut full_path = ASSETS_PATH.to_path_buf();
     full_path.push(rel_path);
     Ok(full_path)
+}
+
+/// Return the last part of the path, converting to a String.
+fn get_file_name(path: &Path) -> String {
+    // ignore any paths that end in '..'
+    if let Some(p) = path.file_name() {
+        // ignore any paths that failed UTF-8 translation
+        if let Some(pp) = p.to_str() {
+            return pp.to_owned();
+        }
+    }
+    // normal conversion failed, return whatever garbage is there
+    path.to_string_lossy().into_owned()
 }
 
 /// Produce a thumbnail for the given asset (assumed to be an image) that fits
@@ -106,16 +120,33 @@ async fn index(_req: HttpRequest) -> &'static str {
     "See the README.md file for more information."
 }
 
-async fn get_asset(info: web::Path<String>) -> actix_web::Result<impl Responder> {
+async fn get_asset(
+    info: web::Path<String>,
+    query: web::Query<HashMap<String, String>>,
+) -> actix_web::Result<impl Responder> {
+    let wants_attachment = query.get("attachment").is_some();
     if let Ok(filepath) = blob_path(&info) {
         if filepath.exists() {
             // NamedFile will generate an ETag and respond to If-None-Match with
             // 304 Not Modified, and respond to Range requests with 206 Partial
             // Content and a Content-Range header.
-            let named_file = NamedFile::open(filepath)?;
-            let responder = named_file
-                .customize()
-                .insert_header(("Cache-Control", "public, max-age=31536000"));
+            let named_file = NamedFile::open(&filepath)?;
+            let responder = if wants_attachment {
+                // Add Content-Disposition to encourage the browser to save the
+                // file to disk rather than showing the content directly in the
+                // browser. The `download` attribute on the anchor (A) tag has
+                // no effect when the URL is for a different origin.
+                let filename = get_file_name(&filepath);
+                named_file
+                    .set_content_disposition(header::ContentDisposition::attachment(filename))
+                    .customize()
+                    .insert_header(("X-Download-Options", "noopen"))
+                    .insert_header(("Cache-Control", "public, max-age=31536000"))
+            } else {
+                named_file
+                    .customize()
+                    .insert_header(("Cache-Control", "public, max-age=31536000"))
+            };
             Ok(Either::Left(responder))
         } else {
             Ok(Either::Right(HttpResponse::NotFound().finish()))
@@ -390,6 +421,8 @@ mod tests {
         assert_eq!(resp.status().as_u16(), actix_web::http::StatusCode::OK);
         let ctype = resp.headers().get(header::CONTENT_TYPE).unwrap();
         assert_eq!(ctype, "image/jpeg");
+        let dispostion = resp.headers().get(header::CONTENT_DISPOSITION).unwrap();
+        assert_eq!(dispostion, "inline; filename=\"f1t.jpg\"");
 
         // retrieve a second time with the same ETag to get a 304 response
         let etag = resp.headers().get(header::ETAG).unwrap();
@@ -402,6 +435,22 @@ mod tests {
             resp.status().as_u16(),
             actix_web::http::StatusCode::NOT_MODIFIED
         );
+    }
+
+    #[actix_web::test]
+    async fn test_get_asset_jpeg_attachment() {
+        let app =
+            test::init_service(App::new().route("/assets/{id}", web::get().to(get_asset))).await;
+        // MjAxOS0wNC0xNS8wODMwL2YxdC5qcGc= is 2019-04-15/0830/f1t.jpg
+        let uri = "/assets/MjAxOS0wNC0xNS8wODMwL2YxdC5qcGc=?attachment=yes";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        assert_eq!(resp.status().as_u16(), actix_web::http::StatusCode::OK);
+        let ctype = resp.headers().get(header::CONTENT_TYPE).unwrap();
+        assert_eq!(ctype, "image/jpeg");
+        let dispostion = resp.headers().get(header::CONTENT_DISPOSITION).unwrap();
+        assert_eq!(dispostion, "attachment; filename=\"f1t.jpg\"");
     }
 
     #[actix_web::test]

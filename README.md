@@ -48,6 +48,24 @@ cache-control: public, max-age=31536000
 date: Mon, 29 Dec 2025 05:05:19 GMT
 ```
 
+## Downloading as "attachment"
+
+To retrieve an asset in a manner that will encourage the web browser to save the file to disk, pass the `?attachment=yes` query parameter to the `GET /assets/{id}` route. The value for `attachment` can be anything, as long as it is present the `Content-Disposition: attachment` header will be added to the response.
+
+```shell
+$ curl -I 'http://localhost:3000/assets/MjAwMy0wOC0zMC8wMWtkMHIwcWE2cDBzOGc1bm1zMGJiOG01cC5qcGc=?attachment=1'
+HTTP/1.1 200 OK
+content-length: 441
+etag: "b93f69e:1b9:6952e6d9:4d7e08b"
+x-download-options: noopen
+accept-ranges: bytes
+content-disposition: attachment; filename="01kd0r0qa6p0s8g5nms0bb8m5p.jpg"
+content-type: image/jpeg
+last-modified: Mon, 29 Dec 2025 20:38:49 GMT
+cache-control: public, max-age=31536000
+date: Thu, 01 Jan 2026 04:10:07 GMT
+```
+
 ## Deploying with Docker
 
 ```shell
