@@ -22,13 +22,23 @@ pub static ASSETS_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
     PathBuf::from(path)
 });
 
+fn has_control_chars(s: &str) -> bool {
+    s.chars().any(|c| c.is_control())
+}
+
 /// Convert the identifier to a file path within the assets store.
 fn blob_path(encoded: &str) -> Result<PathBuf, Error> {
     let decoded = general_purpose::STANDARD.decode(encoded)?;
-    let as_string = str::from_utf8(&decoded)?;
     // Windows will raise unexpected errors if the path has any trailing EOL
     // characters which is very easy to do with base64 encoding.
-    let rel_path = Path::new(as_string.trim());
+    let as_string = str::from_utf8(&decoded)?.trim();
+    if has_control_chars(as_string) {
+        return Err(anyhow!("control characters not allowed"));
+    }
+    if as_string.contains("..") {
+        return Err(anyhow!("relative paths not allowed"));
+    }
+    let rel_path = Path::new(as_string);
     if rel_path.has_root() {
         return Err(anyhow!("root path not allowed"));
     }
@@ -309,6 +319,20 @@ mod tests {
     use super::*;
     use actix_web::http::header::{self, ContentType};
     use actix_web::{App, test};
+
+    #[test]
+    async fn test_blob_path_relative() {
+        // echo -n 'foo/../bar' | base64
+        let result = blob_path("Zm9vLy4uL2Jhcg==");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    async fn test_blob_path_controls() {
+        // echo -en "foo\tbar" | base64
+        let result = blob_path("Zm9vCWJhcg==");
+        assert!(result.is_err());
+    }
 
     #[actix_web::test]
     async fn test_index_get() {
