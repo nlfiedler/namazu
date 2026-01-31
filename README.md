@@ -4,7 +4,7 @@ A simple blob server for use with [tanuki](https://github.com/nlfiedler/tanuki) 
 
 ## Features
 
-- Supports `GET`, `PUT`, and `DELETE` on assets identified by a base64-encoded path.
+- Supports `GET`, `PUT`, and `DELETE` on assets identified by a base64url-encoded path.
 - Stores files in the directory structure defined by the provided identifiers.
 - Provides a `/thumbnail` endpoint for producing JPEG-formatted thumbnails of images.
 - Generates a unique `ETag` value and responds to `If-None-Match` with a 304 to support browser caching.
@@ -23,20 +23,20 @@ A simple blob server for use with [tanuki](https://github.com/nlfiedler/tanuki) 
 
 ## Uploading files
 
-Files are uploaded via a `PUT` request to the `/assets/{id}` endpoint -- the body of the request is the file content. The `{id}` is substituted with the base64-encoded path of the destination for the asset, including its destined filename. This operation can be performed with the `curl` command, as shown below.
+Files are uploaded via a `PUT` request to the `/assets/{id}` endpoint -- the body of the request is the file content. The `{id}` is substituted with the base64url-encoded path of the destination for the asset, including its destined filename. This operation can be performed with the `curl` command, as shown below.
 
 The paths and names shown below are examples.
 
 ```shell
-$ echo -n '2003-08-30/01kd0r0qa6p0s8g5nms0bb8m5p.jpg' | base64
-MjAwMy0wOC0zMC8wMWtkMHIwcWE2cDBzOGc1bm1zMGJiOG01cC5qcGc=
+$ echo -n '2003-08-30/01kd0r0qa6p0s8g5nms0bb8m5p.jpg' | base64 | tr '+/' '-_' | tr -d '='
+MjAwMy0wOC0zMC8wMWtkMHIwcWE2cDBzOGc1bm1zMGJiOG01cC5qcGc
 
-$ curl -T tests/fixtures/f2t.jpg http://localhost:3000/assets/MjAwMy0wOC0zMC8wMWtkMHIwcWE2cDBzOGc1bm1zMGJiOG01cC5qcGc=
+$ curl -T tests/fixtures/f2t.jpg http://localhost:3000/assets/MjAwMy0wOC0zMC8wMWtkMHIwcWE2cDBzOGc1bm1zMGJiOG01cC5qcGc
 HTTP/1.1 201 Created
 content-length: 0
 date: Mon, 29 Dec 2025 05:04:26 GMT
 
-$ curl -I http://localhost:3000/assets/MjAwMy0wOC0zMC8wMWtkMHIwcWE2cDBzOGc1bm1zMGJiOG01cC5qcGc=
+$ curl -I http://localhost:3000/assets/MjAwMy0wOC0zMC8wMWtkMHIwcWE2cDBzOGc1bm1zMGJiOG01cC5qcGc
 HTTP/1.1 200 OK
 content-length: 441
 content-disposition: inline; filename="01kd0r0qa6p0s8g5nms0bb8m5p.jpg"
@@ -53,7 +53,7 @@ date: Mon, 29 Dec 2025 05:05:19 GMT
 To retrieve an asset in a manner that will encourage the web browser to save the file to disk, pass the `?attachment=yes` query parameter to the `GET /assets/{id}` route. The value for `attachment` can be anything, as long as it is present the `Content-Disposition: attachment` header will be added to the response.
 
 ```shell
-$ curl -I 'http://localhost:3000/assets/MjAwMy0wOC0zMC8wMWtkMHIwcWE2cDBzOGc1bm1zMGJiOG01cC5qcGc=?attachment=1'
+$ curl -I 'http://localhost:3000/assets/MjAwMy0wOC0zMC8wMWtkMHIwcWE2cDBzOGc1bm1zMGJiOG01cC5qcGc?attachment=1'
 HTTP/1.1 200 OK
 content-length: 441
 etag: "b93f69e:1b9:6952e6d9:4d7e08b"

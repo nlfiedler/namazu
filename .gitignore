@@ -4,6 +4,8 @@
 # Rust build artifacts
 Cargo.lock
 target
+healthcheck/Cargo.lock
+healthcheck/target
 
 # environment configuration
 .env

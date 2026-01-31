@@ -28,7 +28,7 @@ fn has_control_chars(s: &str) -> bool {
 
 /// Convert the identifier to a file path within the assets store.
 fn blob_path(encoded: &str) -> Result<PathBuf, Error> {
-    let decoded = general_purpose::STANDARD.decode(encoded)?;
+    let decoded = general_purpose::URL_SAFE_NO_PAD.decode(encoded)?;
     // Windows will raise unexpected errors if the path has any trailing EOL
     // characters which is very easy to do with base64 encoding.
     let as_string = str::from_utf8(&decoded)?.trim();
@@ -322,15 +322,15 @@ mod tests {
 
     #[test]
     async fn test_blob_path_relative() {
-        // echo -n 'foo/../bar' | base64
-        let result = blob_path("Zm9vLy4uL2Jhcg==");
+        // echo -n 'foo/../bar' | base64 | tr '+/' '-_' | tr -d '='
+        let result = blob_path("Zm9vLy4uL2Jhcg");
         assert!(result.is_err());
     }
 
     #[test]
     async fn test_blob_path_controls() {
-        // echo -en "foo\tbar" | base64
-        let result = blob_path("Zm9vCWJhcg==");
+        // echo -en "foo\tbar" | base64 | tr '+/' '-_' | tr -d '='
+        let result = blob_path("Zm9vCWJhcg");
         assert!(result.is_err());
     }
 
@@ -375,7 +375,7 @@ mod tests {
         }
 
         if cfg!(windows) {
-            let uri = "/assets/XHdpbmRvd3M="; // \windows
+            let uri = "/assets/XHdpbmRvd3M"; // \windows
             let req = test::TestRequest::with_uri(uri).to_request();
             let resp = test::call_service(&app, req).await;
             assert!(resp.status().is_client_error());
@@ -384,7 +384,7 @@ mod tests {
                 actix_web::http::StatusCode::BAD_REQUEST
             );
 
-            let uri = "/assets/Yzpcd2luZG93cw=="; // c:\windows
+            let uri = "/assets/Yzpcd2luZG93cw"; // c:\windows
             let req = test::TestRequest::with_uri(uri).to_request();
             let resp = test::call_service(&app, req).await;
             assert!(resp.status().is_client_error());
@@ -393,7 +393,7 @@ mod tests {
                 actix_web::http::StatusCode::BAD_REQUEST
             );
 
-            let uri = "/assets/XFxzZXJ2ZXJcc2hhcmU="; // \\server\share
+            let uri = "/assets/XFxzZXJ2ZXJcc2hhcmU"; // \\server\share
             let req = test::TestRequest::with_uri(uri).to_request();
             let resp = test::call_service(&app, req).await;
             assert!(resp.status().is_client_error());
@@ -409,7 +409,7 @@ mod tests {
         let app =
             test::init_service(App::new().route("/assets/{id}", web::get().to(get_asset))).await;
         // MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw== is 2019/08/17/0430/image.jpg
-        let uri = "/assets/MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw==";
+        let uri = "/assets/MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw";
         let req = test::TestRequest::with_uri(uri).to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_client_error());
@@ -438,7 +438,7 @@ mod tests {
         let app =
             test::init_service(App::new().route("/assets/{id}", web::get().to(get_asset))).await;
         // MjAxOS0wNC0xNS8wODMwL2YxdC5qcGc= is 2019-04-15/0830/f1t.jpg
-        let uri = "/assets/MjAxOS0wNC0xNS8wODMwL2YxdC5qcGc=";
+        let uri = "/assets/MjAxOS0wNC0xNS8wODMwL2YxdC5qcGc";
         let req = test::TestRequest::with_uri(uri).to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
@@ -466,7 +466,7 @@ mod tests {
         let app =
             test::init_service(App::new().route("/assets/{id}", web::get().to(get_asset))).await;
         // MjAxOS0wNC0xNS8wODMwL2YxdC5qcGc= is 2019-04-15/0830/f1t.jpg
-        let uri = "/assets/MjAxOS0wNC0xNS8wODMwL2YxdC5qcGc=?attachment=yes";
+        let uri = "/assets/MjAxOS0wNC0xNS8wODMwL2YxdC5qcGc?attachment=yes";
         let req = test::TestRequest::with_uri(uri).to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
@@ -482,7 +482,7 @@ mod tests {
         let app =
             test::init_service(App::new().route("/assets/{id}", web::get().to(get_asset))).await;
         // MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA== is 2019-04-15/0830/lorem-ipsum.txt
-        let uri = "/assets/MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA==";
+        let uri = "/assets/MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA";
         let req = test::TestRequest::with_uri(uri).to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status().as_u16(), actix_web::http::StatusCode::OK);
@@ -495,7 +495,7 @@ mod tests {
         let app =
             test::init_service(App::new().route("/assets/{id}", web::get().to(get_asset))).await;
         // MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA== is 2019-04-15/0830/lorem-ipsum.txt
-        let uri = "/assets/MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA==";
+        let uri = "/assets/MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA";
         let req = test::TestRequest::with_uri(uri)
             .insert_header(("Range", "bytes=500-999"))
             .to_request();
@@ -534,7 +534,7 @@ mod tests {
         )
         .await;
         // MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw== is 2019/08/17/0430/image.jpg
-        let uri = "/thumbnail/480/320/MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw==";
+        let uri = "/thumbnail/480/320/MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw";
         let req = test::TestRequest::with_uri(uri).to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_client_error());
@@ -551,7 +551,7 @@ mod tests {
         )
         .await;
         // MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA== is 2019-04-15/0830/lorem-ipsum.txt
-        let uri = "/thumbnail/480/320/MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA==";
+        let uri = "/thumbnail/480/320/MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA";
         let req = test::TestRequest::with_uri(uri).to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_redirection());
@@ -644,7 +644,7 @@ mod tests {
         }
 
         if cfg!(windows) {
-            let uri = "/assets/XHdpbmRvd3M="; // \windows
+            let uri = "/assets/XHdpbmRvd3M"; // \windows
             let req = test::TestRequest::with_uri(uri)
                 .method(actix_web::http::Method::PUT)
                 .to_request();
@@ -655,7 +655,7 @@ mod tests {
                 actix_web::http::StatusCode::BAD_REQUEST
             );
 
-            let uri = "/assets/Yzpcd2luZG93cw=="; // c:\windows
+            let uri = "/assets/Yzpcd2luZG93cw"; // c:\windows
             let req = test::TestRequest::with_uri(uri)
                 .method(actix_web::http::Method::PUT)
                 .to_request();
@@ -666,7 +666,7 @@ mod tests {
                 actix_web::http::StatusCode::BAD_REQUEST
             );
 
-            let uri = "/assets/XFxzZXJ2ZXJcc2hhcmU="; // \\server\share
+            let uri = "/assets/XFxzZXJ2ZXJcc2hhcmU"; // \\server\share
             let req = test::TestRequest::with_uri(uri)
                 .method(actix_web::http::Method::PUT)
                 .to_request();
@@ -683,7 +683,7 @@ mod tests {
     async fn test_put_asset_conflict() {
         let app =
             test::init_service(App::new().route("/assets/{id}", web::put().to(put_asset))).await;
-        let req = test::TestRequest::with_uri("/assets/MjAxOS0wNC0xNS8wODMwL2YxdC5qcGc=")
+        let req = test::TestRequest::with_uri("/assets/MjAxOS0wNC0xNS8wODMwL2YxdC5qcGc")
             .method(actix_web::http::Method::PUT)
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -725,7 +725,7 @@ mod tests {
         let payload = std::fs::read(filepath).expect("file read");
 
         // MjAxOS0wNC0xNS8wODMwL2YydC5qcGc= is 2019-04-15/0830/f2t.jpg
-        let req = test::TestRequest::with_uri("/assets/MjAxOS0wNC0xNS8wODMwL2YydC5qcGc=")
+        let req = test::TestRequest::with_uri("/assets/MjAxOS0wNC0xNS8wODMwL2YydC5qcGc")
             .method(actix_web::http::Method::PUT)
             .append_header((header::CONTENT_TYPE, "image/jpeg"))
             .append_header((header::CONTENT_LENGTH, payload.len()))
@@ -779,7 +779,7 @@ mod tests {
         }
 
         if cfg!(windows) {
-            let uri = "/assets/XHdpbmRvd3M="; // \windows
+            let uri = "/assets/XHdpbmRvd3M"; // \windows
             let req = test::TestRequest::with_uri(uri)
                 .method(actix_web::http::Method::DELETE)
                 .to_request();
@@ -790,7 +790,7 @@ mod tests {
                 actix_web::http::StatusCode::BAD_REQUEST
             );
 
-            let uri = "/assets/Yzpcd2luZG93cw=="; // c:\windows
+            let uri = "/assets/Yzpcd2luZG93cw"; // c:\windows
             let req = test::TestRequest::with_uri(uri)
                 .method(actix_web::http::Method::DELETE)
                 .to_request();
@@ -801,7 +801,7 @@ mod tests {
                 actix_web::http::StatusCode::BAD_REQUEST
             );
 
-            let uri = "/assets/XFxzZXJ2ZXJcc2hhcmU="; // \\server\share
+            let uri = "/assets/XFxzZXJ2ZXJcc2hhcmU"; // \\server\share
             let req = test::TestRequest::with_uri(uri)
                 .method(actix_web::http::Method::DELETE)
                 .to_request();
@@ -820,7 +820,7 @@ mod tests {
             test::init_service(App::new().route("/assets/{id}", web::delete().to(delete_asset)))
                 .await;
         // MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw== is 2019/08/17/0430/image.jpg
-        let req = test::TestRequest::with_uri("/assets/MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw==")
+        let req = test::TestRequest::with_uri("/assets/MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw")
             .method(actix_web::http::Method::DELETE)
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -842,7 +842,7 @@ mod tests {
             test::init_service(App::new().route("/assets/{id}", web::delete().to(delete_asset)))
                 .await;
         // MjAxOS0wNC0xNS8wODMwL2YzdC5qcGc= is 2019-04-15/0830/f3t.jpg
-        let req = test::TestRequest::with_uri("/assets/MjAxOS0wNC0xNS8wODMwL2YzdC5qcGc=")
+        let req = test::TestRequest::with_uri("/assets/MjAxOS0wNC0xNS8wODMwL2YzdC5qcGc")
             .method(actix_web::http::Method::DELETE)
             .to_request();
         let resp = test::call_service(&app, req).await;
