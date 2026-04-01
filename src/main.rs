@@ -695,12 +695,11 @@ mod tests {
     }
 
     fn checksum_file(infile: &Path) -> std::io::Result<String> {
-        use sha2::{Digest, Sha256};
         let mut file = std::fs::File::open(infile)?;
-        let mut hasher = Sha256::new();
+        let mut hasher = blake3::Hasher::new();
         std::io::copy(&mut file, &mut hasher)?;
         let digest = hasher.finalize();
-        Ok(format!("{:x}", digest))
+        Ok(format!("{}", digest))
     }
 
     #[actix_web::test]
@@ -738,7 +737,7 @@ mod tests {
         let digest = checksum_file(expected_path).expect("checksum");
         assert_eq!(
             digest,
-            "c52b9501d1037c50c8d20969a36a888b71310ff90ee557f813330144d8377b18"
+            "72e32e7ef56e4b29d5f8897496c4b3dd8ca338a80ee026bb406e8d59f679d908"
         );
         std::fs::remove_file(expected_path).expect("delete file");
     }
