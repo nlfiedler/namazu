@@ -6,18 +6,20 @@ use actix_web::http::header;
 use actix_web::{App, Either, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder, web};
 use anyhow::{Error, anyhow};
 use base64::{Engine as _, engine::general_purpose};
-use log::info;
+use log::{info, warn};
 use std::collections::HashMap;
 use std::env;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 #[cfg(test)]
-static DEFAULT_ASSETS_PATH: &str = "tests/blobs";
+const DEFAULT_ASSETS_PATH: &str = "tests/blobs";
 #[cfg(not(test))]
-static DEFAULT_ASSETS_PATH: &str = "tmp/blobs";
+const DEFAULT_ASSETS_PATH: &str = "tmp/blobs";
 
-pub static ASSETS_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
+static ASSETS_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
     let path = env::var("ASSETS_PATH").unwrap_or_else(|_| DEFAULT_ASSETS_PATH.to_owned());
     PathBuf::from(path)
 });
@@ -51,15 +53,12 @@ fn blob_path(encoded: &str) -> Result<PathBuf, Error> {
 
 /// Return the last part of the path, converting to a String.
 fn get_file_name(path: &Path) -> String {
-    // ignore any paths that end in '..'
-    if let Some(p) = path.file_name() {
-        // ignore any paths that failed UTF-8 translation
-        if let Some(pp) = p.to_str() {
-            return pp.to_owned();
-        }
-    }
-    // normal conversion failed, return whatever garbage is there
-    path.to_string_lossy().into_owned()
+    // ignore any paths that end in '..' and ignore any paths that failed UTF-8
+    // translation; if normal conversion failed, use lossy conversion
+    path.file_name()
+        .and_then(|p| p.to_str())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
 /// Produce a thumbnail for the given asset (assumed to be an image) that fits
@@ -84,15 +83,15 @@ fn create_thumbnail(filepath: &Path, width: u32, height: u32) -> Result<Vec<u8>,
             }
             img = correct_orientation(orientation, img);
         }
-        _ => {
+        Err(e) => {
+            warn!("EXIF reading failed: {e:#}");
             img = img.thumbnail(width, height);
         }
     }
     // The image crate's JpegEncoder will use a quality factor of 75 by default,
     // which yields very good results (libvips uses the same default).
     img.write_to(&mut cursor, image::ImageFormat::Jpeg)?;
-    let buffer: Vec<u8> = cursor.into_inner();
-    Ok(buffer)
+    Ok(cursor.into_inner())
 }
 
 /// Extract the EXIF orientation value from the asset, if any.
@@ -126,7 +125,7 @@ fn correct_orientation(orientation: u16, img: image::DynamicImage) -> image::Dyn
     }
 }
 
-async fn index(_req: HttpRequest) -> &'static str {
+async fn index() -> &'static str {
     "See the README.md file for more information."
 }
 
@@ -136,30 +135,34 @@ async fn get_asset(
 ) -> actix_web::Result<impl Responder> {
     let wants_attachment = query.get("attachment").is_some();
     if let Ok(filepath) = blob_path(&info) {
-        if filepath.exists() {
-            // NamedFile will generate an ETag and respond to If-None-Match with
-            // 304 Not Modified, and respond to Range requests with 206 Partial
-            // Content and a Content-Range header.
-            let named_file = NamedFile::open(&filepath)?;
-            let responder = if wants_attachment {
-                // Add Content-Disposition to encourage the browser to save the
-                // file to disk rather than showing the content directly in the
-                // browser. The `download` attribute on the anchor (A) tag has
-                // no effect when the URL is for a different origin.
-                let filename = get_file_name(&filepath);
-                named_file
-                    .set_content_disposition(header::ContentDisposition::attachment(filename))
-                    .customize()
-                    .insert_header(("X-Download-Options", "noopen"))
-                    .insert_header(("Cache-Control", "public, max-age=31536000"))
-            } else {
-                named_file
-                    .customize()
-                    .insert_header(("Cache-Control", "public, max-age=31536000"))
-            };
-            Ok(Either::Left(responder))
-        } else {
-            Ok(Either::Right(HttpResponse::NotFound().finish()))
+        // NamedFile will generate an ETag and respond to If-None-Match with 304
+        // Not Modified, and respond to Range requests with 206 Partial Content
+        // and a Content-Range header.
+        match NamedFile::open(&filepath) {
+            Ok(named_file) => {
+                let responder = if wants_attachment {
+                    // Add Content-Disposition to encourage the browser to save
+                    // the file to disk rather than showing the content directly
+                    // in the browser. The `download` attribute on the anchor
+                    // (A) tag has no effect when the URL is for a different
+                    // origin.
+                    let filename = get_file_name(&filepath);
+                    named_file
+                        .set_content_disposition(header::ContentDisposition::attachment(filename))
+                        .customize()
+                        .insert_header(("X-Download-Options", "noopen"))
+                        .insert_header(("Cache-Control", "public, max-age=31536000"))
+                } else {
+                    named_file
+                        .customize()
+                        .insert_header(("Cache-Control", "public, max-age=31536000"))
+                };
+                Ok(Either::Left(responder))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                Ok(Either::Right(HttpResponse::NotFound().finish()))
+            }
+            Err(e) => Err(e.into()),
         }
     } else {
         // if path conversion fails, probably client error
@@ -170,27 +173,45 @@ async fn get_asset(
 // Produce a thumbnail for the asset of the requested size.
 async fn get_thumbnail(req: HttpRequest) -> actix_web::Result<HttpResponse> {
     // => /thumbnail/{w}/{h}/{id}
-    let width: u32 = req.match_info().get("w").unwrap().parse().unwrap();
-    let height: u32 = req.match_info().get("h").unwrap().parse().unwrap();
-    let identifier: String = req.match_info().get("id").unwrap().to_owned();
+    let width: u32 = req
+        .match_info()
+        .get("w")
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| actix_web::error::ErrorBadRequest("invalid width"))?;
+    let height: u32 = req
+        .match_info()
+        .get("h")
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| actix_web::error::ErrorBadRequest("invalid height"))?;
+    let identifier: String = req
+        .match_info()
+        .get("id")
+        .ok_or_else(|| actix_web::error::ErrorBadRequest("missing id"))?
+        .to_owned();
     let etag_value = format!("{}:{}:{}", width, height, &identifier);
     let etag: header::EntityTag = header::EntityTag::new_strong(etag_value);
     if none_match(&etag, &req) {
         if let Ok(filepath) = blob_path(&identifier) {
-            if filepath.exists() {
-                let result = web::block(move || create_thumbnail(&filepath, width, height)).await?;
-                match result {
-                    Ok(data) => Ok(HttpResponse::Ok()
-                        .content_type("image/jpeg")
-                        .append_header((header::CONTENT_LENGTH, data.len() as u64))
-                        .append_header((header::ETAG, etag))
-                        .body(data)),
-                    Err(_) => Ok(HttpResponse::TemporaryRedirect()
+            let result = web::block(move || create_thumbnail(&filepath, width, height)).await?;
+            match result {
+                Ok(data) => Ok(HttpResponse::Ok()
+                    .content_type("image/jpeg")
+                    .append_header((header::CONTENT_LENGTH, data.len() as u64))
+                    .append_header((header::ETAG, etag))
+                    .body(data)),
+                Err(e) => {
+                    let is_not_found = e
+                        .chain()
+                        .filter_map(|cause| cause.downcast_ref::<io::Error>())
+                        .any(|io_err| io_err.kind() == io::ErrorKind::NotFound);
+                    if is_not_found {
+                        return Ok(HttpResponse::NotFound().finish());
+                    }
+                    warn!("thumbnail generation failed: {e:#}");
+                    Ok(HttpResponse::TemporaryRedirect()
                         .append_header((header::LOCATION, "/public/placeholder.svg"))
-                        .finish()),
+                        .finish())
                 }
-            } else {
-                Ok(HttpResponse::NotFound().finish())
             }
         } else {
             // if path conversion fails, probably client error
@@ -205,14 +226,7 @@ async fn get_thumbnail(req: HttpRequest) -> actix_web::Result<HttpResponse> {
 fn none_match(etag: &header::EntityTag, req: &HttpRequest) -> bool {
     match req.get_header::<header::IfNoneMatch>() {
         Some(header::IfNoneMatch::Any) => false,
-        Some(header::IfNoneMatch::Items(ref items)) => {
-            for item in items {
-                if item.weak_eq(etag) {
-                    return false;
-                }
-            }
-            true
-        }
+        Some(header::IfNoneMatch::Items(items)) => !items.iter().any(|item| item.weak_eq(etag)),
         None => true,
     }
 }
@@ -223,37 +237,40 @@ async fn put_asset(
     mut payload: web::Payload,
 ) -> actix_web::Result<HttpResponse> {
     use futures::StreamExt;
-    use std::io::Write;
+    use tokio::io::AsyncWriteExt;
 
     if let Ok(filepath) = blob_path(&info) {
-        if filepath.exists() {
-            Ok(HttpResponse::Conflict().finish())
-        } else {
-            // store the file content to the given path
-            let fp_clone = filepath.clone();
-            // file operations are blocking, use threadpool
-            let mut file = web::block(move || {
-                let parent_dir = fp_clone.parent().expect("no parent");
-                std::fs::create_dir_all(parent_dir)?;
-                std::fs::File::create(fp_clone)
-            })
-            .await??;
-            // the body is a stream of Bytes objects
-            while let Some(chunk) = payload.next().await {
-                let data = chunk?;
-                // file operations are blocking, use threadpool
-                file = web::block(move || file.write_all(&data).map(|_| file)).await??;
+        // store the file content to the given path
+        let parent_dir = filepath
+            .parent()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
+        tokio::fs::create_dir_all(parent_dir).await?;
+        let mut file = match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&filepath)
+            .await
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                return Ok(HttpResponse::Conflict().finish());
             }
-            // ensure file is readable by backup programs and the like
-            #[cfg(target_family = "unix")]
-            {
-                use std::fs::Permissions;
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&filepath, Permissions::from_mode(0o644))?;
-            }
-            info!("asset {} saved to {}", info, filepath.display());
-            Ok(HttpResponse::Created().finish())
+            Err(err) => return Err(err.into()),
+        };
+        // the body is a stream of Bytes objects
+        while let Some(chunk) = payload.next().await {
+            let data = chunk?;
+            file.write_all(&data).await?;
         }
+        // ensure file is readable by backup programs and the like
+        #[cfg(target_family = "unix")]
+        {
+            use fs::Permissions;
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&filepath, Permissions::from_mode(0o644)).await?;
+        }
+        info!("asset {} saved to {}", info, filepath.display());
+        Ok(HttpResponse::Created().finish())
     } else {
         // if path conversion fails, probably client error
         Ok(HttpResponse::BadRequest().finish())
@@ -262,11 +279,10 @@ async fn put_asset(
 
 async fn delete_asset(info: web::Path<String>) -> actix_web::Result<HttpResponse> {
     if let Ok(filepath) = blob_path(&info) {
-        if filepath.exists() {
-            std::fs::remove_file(filepath)?;
-            Ok(HttpResponse::Ok().finish())
-        } else {
-            Ok(HttpResponse::NotFound().finish())
+        match fs::remove_file(&filepath) {
+            Ok(_) => Ok(HttpResponse::Ok().finish()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(HttpResponse::NotFound().finish()),
+            Err(e) => Err(e.into()),
         }
     } else {
         // if path conversion fails, probably client error
@@ -317,22 +333,27 @@ async fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::http::header::{self, ContentType};
-    use actix_web::{App, test};
 
     #[test]
-    async fn test_blob_path_relative() {
+    fn test_blob_path_relative() {
         // echo -n 'foo/../bar' | base64 | tr '+/' '-_' | tr -d '='
         let result = blob_path("Zm9vLy4uL2Jhcg");
         assert!(result.is_err());
     }
 
     #[test]
-    async fn test_blob_path_controls() {
+    fn test_blob_path_controls() {
         // echo -en "foo\tbar" | base64 | tr '+/' '-_' | tr -d '='
         let result = blob_path("Zm9vCWJhcg");
         assert!(result.is_err());
     }
+}
+
+#[cfg(test)]
+mod async_tests {
+    use super::*;
+    use actix_web::http::header::{self, ContentType};
+    use actix_web::{App, test};
 
     #[actix_web::test]
     async fn test_index_get() {
@@ -699,7 +720,7 @@ mod tests {
         let mut hasher = blake3::Hasher::new();
         std::io::copy(&mut file, &mut hasher)?;
         let digest = hasher.finalize();
-        Ok(format!("{}", digest))
+        Ok(format!("{digest}"))
     }
 
     #[actix_web::test]
