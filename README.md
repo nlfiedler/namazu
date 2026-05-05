@@ -7,6 +7,7 @@ A simple blob server for use with [tanuki](https://github.com/nlfiedler/tanuki) 
 - Supports `GET`, `PUT`, and `DELETE` on assets identified by a base64url-encoded path.
 - Stores files in the directory structure defined by the provided identifiers.
 - Provides a `/thumbnail` endpoint for producing JPEG-formatted thumbnails of images.
+- Provides a `/preview` endpoint for producing JPEG previews constrained to a target displayed `width` or `height` (one or the other) in pixels, preserving aspect ratio.
 - Generates a unique `ETag` value and responds to `If-None-Match` with a 304 to support browser caching.
 - Supports `Range` request header and responds with a 206 which benefits browser requests for video files.
 

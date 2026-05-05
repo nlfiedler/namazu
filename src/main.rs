@@ -94,6 +94,53 @@ fn create_thumbnail(filepath: &Path, width: u32, height: u32) -> Result<Vec<u8>,
     Ok(cursor.into_inner())
 }
 
+/// Produce a JPEG preview of the given asset (assumed to be an image),
+/// constrained to the given displayed width or height (after EXIF orientation
+/// correction), with the other dimension scaled to maintain aspect ratio.
+/// Exactly one of `width` or `height` must be `Some`.
+///
+/// If the asset is not an image, or any other problem arises, returns an error.
+fn create_preview(
+    filepath: &Path,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<Vec<u8>, Error> {
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    let mut img = image::ImageReader::open(filepath)?
+        .with_guessed_format()?
+        .decode()?;
+    let (w, h) = (img.width(), img.height());
+    let orientation = get_image_orientation(filepath).ok();
+    // When the image is sideways (orientation > 4), EXIF rotation swaps the
+    // stored width and height for display. Compute the desired displayed size,
+    // then map back to stored coordinates so thumbnail() resizes correctly
+    // before correct_orientation rotates the result.
+    let sideways = orientation.map(|o| o > 4).unwrap_or(false);
+    let (disp_w, disp_h) = if sideways { (h, w) } else { (w, h) };
+    let (target_disp_w, target_disp_h) = match (width, height) {
+        (Some(tw), None) => (
+            tw,
+            (tw as u64 * disp_h as u64 / disp_w.max(1) as u64) as u32,
+        ),
+        (None, Some(th)) => (
+            (th as u64 * disp_w as u64 / disp_h.max(1) as u64) as u32,
+            th,
+        ),
+        _ => return Err(anyhow!("must specify exactly one of width or height")),
+    };
+    let (target_w, target_h) = if sideways {
+        (target_disp_h, target_disp_w)
+    } else {
+        (target_disp_w, target_disp_h)
+    };
+    img = img.thumbnail(target_w, target_h);
+    if let Some(o) = orientation {
+        img = correct_orientation(o, img);
+    }
+    img.write_to(&mut cursor, image::ImageFormat::Jpeg)?;
+    Ok(cursor.into_inner())
+}
+
 /// Extract the EXIF orientation value from the asset, if any.
 fn get_image_orientation(filepath: &Path) -> Result<u16, Error> {
     let file = std::fs::File::open(filepath)?;
@@ -222,6 +269,61 @@ async fn get_thumbnail(req: HttpRequest) -> actix_web::Result<HttpResponse> {
     }
 }
 
+// Produce a JPEG preview constrained to a displayed width or height (in pixels)
+// supplied via `?width=N` or `?height=N`. Exactly one must be provided.
+async fn get_preview(
+    info: web::Path<String>,
+    query: web::Query<HashMap<String, String>>,
+    req: HttpRequest,
+) -> actix_web::Result<HttpResponse> {
+    let width = query.get("width").and_then(|v| v.parse::<u32>().ok());
+    let height = query.get("height").and_then(|v| v.parse::<u32>().ok());
+    if width.is_some() == height.is_some() {
+        // both or neither — ambiguous request
+        return Ok(HttpResponse::BadRequest().finish());
+    }
+    let identifier = info.into_inner();
+    // "p:" prefix keeps preview ETags disjoint from /thumbnail's "{w}:{h}:{id}".
+    // Absent dimension is encoded as "_" so width=N and height=N can't collide.
+    let etag_value = format!(
+        "p:{}:{}:{}",
+        width.map(|n| n.to_string()).unwrap_or_else(|| "_".into()),
+        height.map(|n| n.to_string()).unwrap_or_else(|| "_".into()),
+        &identifier,
+    );
+    let etag: header::EntityTag = header::EntityTag::new_strong(etag_value);
+    if none_match(&etag, &req) {
+        if let Ok(filepath) = blob_path(&identifier) {
+            let result =
+                web::block(move || create_preview(&filepath, width, height)).await?;
+            match result {
+                Ok(data) => Ok(HttpResponse::Ok()
+                    .content_type("image/jpeg")
+                    .append_header((header::CONTENT_LENGTH, data.len() as u64))
+                    .append_header((header::ETAG, etag))
+                    .body(data)),
+                Err(e) => {
+                    let is_not_found = e
+                        .chain()
+                        .filter_map(|cause| cause.downcast_ref::<io::Error>())
+                        .any(|io_err| io_err.kind() == io::ErrorKind::NotFound);
+                    if is_not_found {
+                        return Ok(HttpResponse::NotFound().finish());
+                    }
+                    warn!("preview generation failed: {e:#}");
+                    Ok(HttpResponse::TemporaryRedirect()
+                        .append_header((header::LOCATION, "/public/placeholder.svg"))
+                        .finish())
+                }
+            }
+        } else {
+            Ok(HttpResponse::BadRequest().finish())
+        }
+    } else {
+        Ok(HttpResponse::NotModified().finish())
+    }
+}
+
 // Returns true if `req` does not have an `If-None-Match` header matching `etag`.
 fn none_match(etag: &header::EntityTag, req: &HttpRequest) -> bool {
     match req.get_header::<header::IfNoneMatch>() {
@@ -319,6 +421,7 @@ async fn main() -> std::io::Result<()> {
             )
             .service(favicon)
             .route("/thumbnail/{w}/{h}/{id}", web::get().to(get_thumbnail))
+            .route("/preview/{id}", web::get().to(get_preview))
             .route("/assets/{id}", web::get().to(get_asset))
             .route("/assets/{id}", web::head().to(get_asset))
             .route("/assets/{id}", web::put().to(put_asset))
@@ -629,6 +732,139 @@ mod async_tests {
             resp.status().as_u16(),
             actix_web::http::StatusCode::NOT_MODIFIED
         );
+    }
+
+    #[actix_web::test]
+    async fn test_preview_bad_encoding() {
+        let app = test::init_service(
+            App::new().route("/preview/{id}", web::get().to(get_preview)),
+        )
+        .await;
+        let uri = "/preview/thisisnotbase64?height=300";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_client_error());
+        assert_eq!(
+            resp.status().as_u16(),
+            actix_web::http::StatusCode::BAD_REQUEST
+        )
+    }
+
+    #[actix_web::test]
+    async fn test_preview_missing_dimensions() {
+        let app = test::init_service(
+            App::new().route("/preview/{id}", web::get().to(get_preview)),
+        )
+        .await;
+        // MjAxOS0wNC0xNS8wODMwL2ZpZ2h0aW5nX2tpdHRlbnMuanBn is 2019-04-15/0830/fighting_kittens.jpg
+        let id = "MjAxOS0wNC0xNS8wODMwL2ZpZ2h0aW5nX2tpdHRlbnMuanBn";
+
+        // neither width nor height
+        let req = test::TestRequest::with_uri(&format!("/preview/{id}")).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            actix_web::http::StatusCode::BAD_REQUEST
+        );
+
+        // both width and height
+        let req =
+            test::TestRequest::with_uri(&format!("/preview/{id}?width=300&height=300")).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            actix_web::http::StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_preview_missing_file() {
+        let app = test::init_service(
+            App::new().route("/preview/{id}", web::get().to(get_preview)),
+        )
+        .await;
+        // MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw== is 2019/08/17/0430/image.jpg
+        let uri = "/preview/MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw?height=300";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_client_error());
+        assert_eq!(
+            resp.status().as_u16(),
+            actix_web::http::StatusCode::NOT_FOUND
+        )
+    }
+
+    #[actix_web::test]
+    async fn test_preview_not_image() {
+        let app = test::init_service(
+            App::new().route("/preview/{id}", web::get().to(get_preview)),
+        )
+        .await;
+        // MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA== is 2019-04-15/0830/lorem-ipsum.txt
+        let uri = "/preview/MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA?height=300";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_redirection());
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            "/public/placeholder.svg"
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_preview_by_height() {
+        let app = test::init_service(
+            App::new().route("/preview/{id}", web::get().to(get_preview)),
+        )
+        .await;
+        // MjAxOS0wNC0xNS8wODMwL2ZpZ2h0aW5nX2tpdHRlbnMuanBn is 2019-04-15/0830/fighting_kittens.jpg
+        let uri = "/preview/MjAxOS0wNC0xNS8wODMwL2ZpZ2h0aW5nX2tpdHRlbnMuanBn?height=300";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        assert_eq!(resp.status().as_u16(), actix_web::http::StatusCode::OK);
+        let ctype = resp.headers().get(header::CONTENT_TYPE).unwrap();
+        assert_eq!(ctype, "image/jpeg");
+        let etag = resp.headers().get(header::ETAG).unwrap().clone();
+        // verify the displayed height matches the requested size
+        let body = test::read_body(resp).await;
+        let decoded = image::ImageReader::new(std::io::Cursor::new(body))
+            .with_guessed_format()
+            .expect("guess format")
+            .decode()
+            .expect("decode preview");
+        assert_eq!(decoded.height(), 300);
+
+        // retrieve a second time with the same ETag to get a 304 response
+        let req = test::TestRequest::with_uri(uri)
+            .insert_header(("If-None-Match", etag))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_redirection());
+        assert_eq!(
+            resp.status().as_u16(),
+            actix_web::http::StatusCode::NOT_MODIFIED
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_preview_by_width() {
+        let app = test::init_service(
+            App::new().route("/preview/{id}", web::get().to(get_preview)),
+        )
+        .await;
+        // MjAxOS0wNC0xNS8wODMwL2ZpZ2h0aW5nX2tpdHRlbnMuanBn is 2019-04-15/0830/fighting_kittens.jpg
+        let uri = "/preview/MjAxOS0wNC0xNS8wODMwL2ZpZ2h0aW5nX2tpdHRlbnMuanBn?width=300";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        let body = test::read_body(resp).await;
+        let decoded = image::ImageReader::new(std::io::Cursor::new(body))
+            .with_guessed_format()
+            .expect("guess format")
+            .decode()
+            .expect("decode preview");
+        assert_eq!(decoded.width(), 300);
     }
 
     #[actix_web::test]
