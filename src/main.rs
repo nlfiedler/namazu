@@ -61,11 +61,76 @@ fn get_file_name(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
-/// Produce a thumbnail for the given asset (assumed to be an image) that fits
-/// within the bounds given while maintaining aspect ratio.
+/// True if the path's extension matches a recognized video container.
+fn is_video(filepath: &Path) -> bool {
+    filepath
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .map(|e| {
+            matches!(
+                e.as_str(),
+                "mp4" | "mov" | "m4v" | "mkv" | "webm" | "avi" | "mpeg" | "mpg"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Extract a representative frame from a video as JPEG bytes via ffmpeg.
 ///
-/// If the asset is not an image, or any other problem arises, returns an error.
+/// `vf` is the `-vf` filter chain (typically begins with `thumbnail` for
+/// representative-frame selection). A missing source file produces an
+/// `io::ErrorKind::NotFound` so the route handler can map it to a 404; any
+/// other failure (ffmpeg not on PATH, decode error, unsupported codec) returns
+/// a generic error so the handler redirects to the placeholder.
+fn extract_video_frame(filepath: &Path, vf: &str) -> Result<Vec<u8>, Error> {
+    use std::process::Command;
+    // Surface a missing source as ErrorKind::NotFound before invoking ffmpeg —
+    // ffmpeg's own exit status would otherwise be indistinguishable from any
+    // other decode failure.
+    let _ = std::fs::File::open(filepath)?;
+    let output = Command::new("ffmpeg")
+        .args(["-nostdin", "-loglevel", "error"])
+        .arg("-i")
+        .arg(filepath)
+        .args([
+            "-frames:v", "1", "-vf", vf, "-f", "image2", "-vcodec", "mjpeg", "-",
+        ])
+        .output()
+        .map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                anyhow!("ffmpeg binary not found in PATH")
+            } else {
+                anyhow!("failed to invoke ffmpeg: {e}")
+            }
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "ffmpeg exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    if output.stdout.is_empty() {
+        return Err(anyhow!("ffmpeg produced no output"));
+    }
+    Ok(output.stdout)
+}
+
+/// Produce a thumbnail for the given asset that fits within the bounds given
+/// while maintaining aspect ratio. Image assets are decoded with the `image`
+/// crate; video assets are handled by ffmpeg's `thumbnail` filter.
+///
+/// If the asset cannot be decoded, or any other problem arises, returns an
+/// error.
 fn create_thumbnail(filepath: &Path, width: u32, height: u32) -> Result<Vec<u8>, Error> {
+    if is_video(filepath) {
+        let vf = format!(
+            "thumbnail,scale='min(iw,{width})':'min(ih,{height})':force_original_aspect_ratio=decrease"
+        );
+        return extract_video_frame(filepath, &vf);
+    }
     let mut cursor = std::io::Cursor::new(Vec::new());
     // The image crate does not recognize .jpe extension as jpeg, so use the
     // format guessing code based on the first few bytes.
@@ -94,17 +159,27 @@ fn create_thumbnail(filepath: &Path, width: u32, height: u32) -> Result<Vec<u8>,
     Ok(cursor.into_inner())
 }
 
-/// Produce a JPEG preview of the given asset (assumed to be an image),
-/// constrained to the given displayed width or height (after EXIF orientation
-/// correction), with the other dimension scaled to maintain aspect ratio.
-/// Exactly one of `width` or `height` must be `Some`.
+/// Produce a JPEG preview of the given asset, constrained to the given
+/// displayed width or height (after EXIF orientation correction for images),
+/// with the other dimension scaled to maintain aspect ratio. Exactly one of
+/// `width` or `height` must be `Some`. Image assets are decoded with the
+/// `image` crate; video assets are handled by ffmpeg.
 ///
-/// If the asset is not an image, or any other problem arises, returns an error.
+/// If the asset cannot be decoded, or any other problem arises, returns an
+/// error.
 fn create_preview(
     filepath: &Path,
     width: Option<u32>,
     height: Option<u32>,
 ) -> Result<Vec<u8>, Error> {
+    if is_video(filepath) {
+        let vf = match (width, height) {
+            (Some(w), None) => format!("thumbnail,scale='min(iw,{w})':-2"),
+            (None, Some(h)) => format!("thumbnail,scale=-2:'min(ih,{h})'"),
+            _ => return Err(anyhow!("must specify exactly one of width or height")),
+        };
+        return extract_video_frame(filepath, &vf);
+    }
     let mut cursor = std::io::Cursor::new(Vec::new());
     let mut img = image::ImageReader::open(filepath)?
         .with_guessed_format()?
@@ -449,6 +524,17 @@ mod tests {
         // echo -en "foo\tbar" | base64 | tr '+/' '-_' | tr -d '='
         let result = blob_path("Zm9vCWJhcg");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_is_video() {
+        assert!(is_video(Path::new("clip.mp4")));
+        assert!(is_video(Path::new("clip.MOV")));
+        assert!(is_video(Path::new("path/to/clip.webm")));
+        assert!(is_video(Path::new("home.video.m4v")));
+        assert!(!is_video(Path::new("photo.jpg")));
+        assert!(!is_video(Path::new("notes.txt")));
+        assert!(!is_video(Path::new("noext")));
     }
 }
 

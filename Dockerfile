@@ -23,6 +23,10 @@ RUN cargo build --release
 # build the final image
 #
 FROM debian:latest
+ENV DEBIAN_FRONTEND="noninteractive"
+RUN apt-get -q update && \
+    apt-get -q -y install --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
 ARG HOST="0.0.0.0"
 ARG PORT="3000"
 WORKDIR /app

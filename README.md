@@ -11,6 +11,10 @@ A simple blob server for use with [tanuki](https://github.com/nlfiedler/tanuki) 
 - Generates a unique `ETag` value and responds to `If-None-Match` with a 304 to support browser caching.
 - Supports `Range` request header and responds with a 206 which benefits browser requests for video files.
 
+## Requirements
+
+To produce thumbnails and previews for video assets, `ffmpeg` will be invoked via a command shell.
+
 ## Configuration
 
 - **ASSETS_PATH**
