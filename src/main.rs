@@ -216,6 +216,118 @@ fn create_preview(
     Ok(cursor.into_inner())
 }
 
+/// Maximum size of the JSON metadata response, in bytes. Files producing more
+/// than this (typically due to oversized MakerNote/UserComment fields or a
+/// pathological video container) get a 413 instead.
+const METADATA_MAX_BYTES: usize = 256 * 1024;
+
+/// Extract metadata as a JSON value from the asset file.
+///
+/// Videos are dispatched to `ffprobe`; everything else is treated as a
+/// potential image and run through the EXIF reader. Files with no EXIF (plain
+/// text, images without an EXIF header, etc.) produce an empty JSON object so
+/// callers can treat the response uniformly. A missing source file surfaces as
+/// `io::ErrorKind::NotFound` so the route handler can map it to 404.
+fn extract_metadata(filepath: &Path) -> Result<serde_json::Value, Error> {
+    if is_video(filepath) {
+        return extract_video_metadata(filepath);
+    }
+    // Ensure missing files surface as NotFound rather than getting masked by
+    // the EXIF reader's "no EXIF -> empty {}" fallback.
+    let file = std::fs::File::open(filepath)?;
+    match extract_image_metadata(file) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            // Treat format-level EXIF errors (no header, malformed, not an
+            // image) as "no metadata available" — but let real I/O errors
+            // bubble up so they surface as 500 instead of a misleading 200.
+            if let Some(exif::Error::Io(_)) = e.downcast_ref::<exif::Error>() {
+                return Err(e);
+            }
+            log::debug!("no EXIF metadata for {}: {e:#}", filepath.display());
+            Ok(serde_json::Value::Object(serde_json::Map::new()))
+        }
+    }
+}
+
+fn extract_video_metadata(filepath: &Path) -> Result<serde_json::Value, Error> {
+    use std::process::Command;
+    // Surface a missing source as ErrorKind::NotFound before invoking ffprobe.
+    let _ = std::fs::File::open(filepath)?;
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+        ])
+        .arg(filepath)
+        .output()
+        .map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                anyhow!("ffprobe binary not found in PATH")
+            } else {
+                anyhow!("failed to invoke ffprobe: {e}")
+            }
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "ffprobe exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    // Bail before parsing if the extractor produced more bytes than we'd ever
+    // be willing to return — avoids building a multi-MB serde_json::Value tree
+    // just to 413 afterwards.
+    if output.stdout.len() > METADATA_MAX_BYTES {
+        return Err(MetadataTooLarge(output.stdout.len()).into());
+    }
+    // Parse + re-serialize so a corrupt extractor stdout becomes an error
+    // instead of being relayed to the client as garbage.
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    Ok(parsed)
+}
+
+/// Marker error type so the route handler can map "extractor exceeded the
+/// size cap" to a 413 instead of a generic 500.
+#[derive(Debug)]
+struct MetadataTooLarge(usize);
+
+impl std::fmt::Display for MetadataTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "metadata exceeds {METADATA_MAX_BYTES} bytes (got {})", self.0)
+    }
+}
+
+impl std::error::Error for MetadataTooLarge {}
+
+fn extract_image_metadata(file: std::fs::File) -> Result<serde_json::Value, Error> {
+    let mut buffer = std::io::BufReader::new(&file);
+    let reader = exif::Reader::new();
+    let exif = reader.read_from_container(&mut buffer)?;
+    let mut map = serde_json::Map::new();
+    for field in exif.fields() {
+        // Only the primary IFD describes the image itself; the thumbnail IFD
+        // contains a (potentially large) embedded JPEG that is useless to
+        // downstream consumers.
+        if field.ifd_num != exif::In::PRIMARY {
+            continue;
+        }
+        // MakerNote is vendor-specific opaque bytes and can be hundreds of KB.
+        if field.tag == exif::Tag::MakerNote {
+            continue;
+        }
+        let key = field.tag.to_string();
+        let value = field.display_value().with_unit(&exif).to_string();
+        map.insert(key, serde_json::Value::String(value));
+    }
+    Ok(serde_json::Value::Object(map))
+}
+
 /// Extract the EXIF orientation value from the asset, if any.
 fn get_image_orientation(filepath: &Path) -> Result<u16, Error> {
     let file = std::fs::File::open(filepath)?;
@@ -399,6 +511,53 @@ async fn get_preview(
     }
 }
 
+/// Return a JSON blob describing everything we can extract from the asset:
+/// ffprobe output for video, EXIF tags for images, an empty object otherwise.
+async fn get_metadata(info: web::Path<String>) -> actix_web::Result<HttpResponse> {
+    let Ok(filepath) = blob_path(&info) else {
+        return Ok(HttpResponse::BadRequest().finish());
+    };
+    let result = web::block(move || {
+        let json = extract_metadata(&filepath)?;
+        let body = serde_json::to_vec(&json)?;
+        if body.len() > METADATA_MAX_BYTES {
+            return Err(MetadataTooLarge(body.len()).into());
+        }
+        Ok::<Vec<u8>, Error>(body)
+    })
+    .await?;
+    match result {
+        Ok(body) => Ok(HttpResponse::Ok()
+            .content_type("application/json")
+            .append_header((header::CONTENT_LENGTH, body.len() as u64))
+            .body(body)),
+        Err(e) => {
+            let is_not_found = e
+                .chain()
+                .filter_map(|cause| cause.downcast_ref::<io::Error>())
+                .any(|io_err| io_err.kind() == io::ErrorKind::NotFound);
+            if is_not_found {
+                return Ok(HttpResponse::NotFound().finish());
+            }
+            if let Some(MetadataTooLarge(size)) = e.downcast_ref::<MetadataTooLarge>() {
+                warn!("metadata for {} exceeded size limit: {} bytes", info, size);
+                let body = serde_json::json!({
+                    "error": "metadata exceeds size limit",
+                    "limit_bytes": METADATA_MAX_BYTES,
+                    "actual_bytes": size,
+                });
+                let body = serde_json::to_vec(&body).unwrap_or_default();
+                return Ok(HttpResponse::PayloadTooLarge()
+                    .content_type("application/json")
+                    .append_header((header::CONTENT_LENGTH, body.len() as u64))
+                    .body(body));
+            }
+            warn!("metadata extraction failed for {}: {e:#}", info);
+            Ok(HttpResponse::InternalServerError().finish())
+        }
+    }
+}
+
 // Returns true if `req` does not have an `If-None-Match` header matching `etag`.
 fn none_match(etag: &header::EntityTag, req: &HttpRequest) -> bool {
     match req.get_header::<header::IfNoneMatch>() {
@@ -497,6 +656,7 @@ async fn main() -> std::io::Result<()> {
             .service(favicon)
             .route("/thumbnail/{w}/{h}/{id}", web::get().to(get_thumbnail))
             .route("/preview/{id}", web::get().to(get_preview))
+            .route("/metadata/{id}", web::get().to(get_metadata))
             .route("/assets/{id}", web::get().to(get_asset))
             .route("/assets/{id}", web::head().to(get_asset))
             .route("/assets/{id}", web::put().to(put_asset))
@@ -951,6 +1111,180 @@ mod async_tests {
             .decode()
             .expect("decode preview");
         assert_eq!(decoded.width(), 300);
+    }
+
+    #[actix_web::test]
+    async fn test_metadata_bad_encoding() {
+        let app = test::init_service(
+            App::new().route("/metadata/{id}", web::get().to(get_metadata)),
+        )
+        .await;
+        let uri = "/metadata/thisisnotbase64";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            actix_web::http::StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_metadata_missing_file() {
+        let app = test::init_service(
+            App::new().route("/metadata/{id}", web::get().to(get_metadata)),
+        )
+        .await;
+        // MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw== is 2019/08/17/0430/image.jpg
+        let uri = "/metadata/MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            actix_web::http::StatusCode::NOT_FOUND
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_metadata_no_exif() {
+        let app = test::init_service(
+            App::new().route("/metadata/{id}", web::get().to(get_metadata)),
+        )
+        .await;
+        // MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA== is 2019-04-15/0830/lorem-ipsum.txt
+        let uri = "/metadata/MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), actix_web::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let body = test::read_body(resp).await;
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).expect("response is JSON");
+        assert_eq!(parsed, serde_json::json!({}));
+    }
+
+    #[actix_web::test]
+    async fn test_metadata_image() {
+        // dcp_1069.jpg is a pre-staged Kodak DC280 sample with a rich EXIF
+        // header at tests/blobs/2019-04-15/0830/dcp_1069.jpg.
+        let app = test::init_service(
+            App::new().route("/metadata/{id}", web::get().to(get_metadata)),
+        )
+        .await;
+        // MjAxOS0wNC0xNS8wODMwL2RjcF8xMDY5LmpwZw is 2019-04-15/0830/dcp_1069.jpg
+        let uri = "/metadata/MjAxOS0wNC0xNS8wODMwL2RjcF8xMDY5LmpwZw";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), actix_web::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let body = test::read_body(resp).await;
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).expect("response is JSON");
+        let obj = parsed.as_object().expect("metadata should be a JSON object");
+
+        // Spot-check stable EXIF fields. Values include surrounding quotes for
+        // ASCII strings and units for numeric tags because kamadak-exif's
+        // display_value() formats them that way.
+        assert_eq!(
+            obj.get("Make").and_then(|v| v.as_str()),
+            Some("\"EASTMAN KODAK COMPANY\"")
+        );
+        assert_eq!(
+            obj.get("Model").and_then(|v| v.as_str()),
+            Some("\"KODAK DC280 ZOOM DIGITAL CAMERA\"")
+        );
+        assert_eq!(
+            obj.get("DateTimeOriginal").and_then(|v| v.as_str()),
+            Some("2003-09-03 17:24:35")
+        );
+        assert_eq!(
+            obj.get("ExposureTime").and_then(|v| v.as_str()),
+            Some("1/125 s")
+        );
+        assert_eq!(obj.get("FNumber").and_then(|v| v.as_str()), Some("f/9.5"));
+        assert_eq!(
+            obj.get("PixelXDimension").and_then(|v| v.as_str()),
+            Some("440 pixels")
+        );
+        assert_eq!(
+            obj.get("ColorSpace").and_then(|v| v.as_str()),
+            Some("sRGB")
+        );
+        // MakerNote and thumbnail-IFD entries must be stripped.
+        assert!(!obj.contains_key("MakerNote"));
+    }
+
+    /// True if the named binary is on PATH (used to skip ffprobe-dependent
+    /// tests in environments without ffmpeg installed).
+    fn binary_on_path(name: &str) -> bool {
+        std::process::Command::new(name)
+            .arg("-version")
+            .output()
+            .is_ok()
+    }
+
+    #[actix_web::test]
+    async fn test_metadata_video() {
+        if !binary_on_path("ffprobe") {
+            eprintln!("skipping test_metadata_video: ffprobe not on PATH");
+            return;
+        }
+        // ooo_tracks.mp4 is a pre-staged H.264 sample at
+        // tests/blobs/2019-04-15/0830/ooo_tracks.mp4.
+        let app = test::init_service(
+            App::new().route("/metadata/{id}", web::get().to(get_metadata)),
+        )
+        .await;
+        // MjAxOS0wNC0xNS8wODMwL29vb190cmFja3MubXA0 is 2019-04-15/0830/ooo_tracks.mp4
+        let uri = "/metadata/MjAxOS0wNC0xNS8wODMwL29vb190cmFja3MubXA0";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), actix_web::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let body = test::read_body(resp).await;
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).expect("response is JSON");
+
+        // Spot-check stable fields from ffprobe's -show_format / -show_streams
+        // output. Numeric video properties surface as JSON numbers, while
+        // ffprobe reports duration/bit_rate as strings.
+        let streams = parsed
+            .get("streams")
+            .and_then(|v| v.as_array())
+            .expect("streams array");
+        assert!(!streams.is_empty(), "expected at least one stream");
+        let video = streams
+            .iter()
+            .find(|s| s.get("codec_type").and_then(|v| v.as_str()) == Some("video"))
+            .expect("expected a video stream");
+        assert_eq!(
+            video.get("codec_name").and_then(|v| v.as_str()),
+            Some("h264")
+        );
+        assert_eq!(video.get("width").and_then(|v| v.as_u64()), Some(816));
+        assert_eq!(video.get("height").and_then(|v| v.as_u64()), Some(608));
+
+        let format = parsed.get("format").expect("format object");
+        let format_name = format
+            .get("format_name")
+            .and_then(|v| v.as_str())
+            .expect("format_name");
+        assert!(
+            format_name.contains("mp4"),
+            "format_name should mention mp4, got {format_name}"
+        );
+        assert_eq!(
+            format.get("duration").and_then(|v| v.as_str()),
+            Some("3.500000")
+        );
     }
 
     #[actix_web::test]
