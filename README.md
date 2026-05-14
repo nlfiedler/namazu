@@ -8,6 +8,7 @@ A simple blob server for use with [tanuki](https://github.com/nlfiedler/tanuki) 
 - Stores files in the directory structure defined by the provided identifiers.
 - Provides a `/thumbnail` endpoint for producing JPEG-formatted thumbnails of images.
 - Provides a `/preview` endpoint for producing JPEG previews constrained to a target displayed `width` or `height` (one or the other) in pixels, preserving aspect ratio.
+- Provides a `/metadata` endpoint for retrieving image and video metadata using an EXIF reader and `ffprobe` as appropriate.
 - Generates a unique `ETag` value and responds to `If-None-Match` with a 304 to support browser caching.
 - Supports `Range` request header and responds with a 206 which benefits browser requests for video files.
 
