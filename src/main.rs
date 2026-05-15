@@ -245,9 +245,39 @@ fn extract_metadata(filepath: &Path) -> Result<serde_json::Value, Error> {
                 return Err(e);
             }
             log::debug!("no EXIF metadata for {}: {e:#}", filepath.display());
-            Ok(serde_json::Value::Object(serde_json::Map::new()))
+            // Fall back to the image crate so clients still get the basic
+            // PixelXDimension/PixelYDimension pair for images that ship
+            // without any EXIF header. Non-images (text files, etc.) will
+            // fail here and produce an empty object as before.
+            Ok(extract_image_dimensions(filepath)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())))
         }
     }
+}
+
+/// Read just the image header to recover width/height, formatted to match the
+/// shape kamadak-exif would have produced for PixelXDimension/PixelYDimension.
+fn extract_image_dimensions(filepath: &Path) -> Result<serde_json::Value, Error> {
+    let (width, height) = image::ImageReader::open(filepath)?
+        .with_guessed_format()?
+        .into_dimensions()?;
+    let mut map = serde_json::Map::new();
+    map.insert("PixelXDimension".to_string(), pixel_dimension_entry(width));
+    map.insert("PixelYDimension".to_string(), pixel_dimension_entry(height));
+    Ok(serde_json::Value::Object(map))
+}
+
+fn pixel_dimension_entry(pixels: u32) -> serde_json::Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "description".to_string(),
+        serde_json::Value::String(format!("{pixels} pixels")),
+    );
+    entry.insert(
+        "value".to_string(),
+        serde_json::Value::Array(vec![serde_json::Value::Number(pixels.into())]),
+    );
+    serde_json::Value::Object(entry)
 }
 
 fn extract_video_metadata(filepath: &Path) -> Result<serde_json::Value, Error> {
@@ -322,10 +352,65 @@ fn extract_image_metadata(file: std::fs::File) -> Result<serde_json::Value, Erro
             continue;
         }
         let key = field.tag.to_string();
-        let value = field.display_value().with_unit(&exif).to_string();
-        map.insert(key, serde_json::Value::String(value));
+        let description = field.display_value().with_unit(&exif).to_string();
+        let raw_value = exif_value_to_json(&field.value);
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "description".to_string(),
+            serde_json::Value::String(description),
+        );
+        entry.insert("value".to_string(), raw_value);
+        map.insert(key, serde_json::Value::Object(entry));
     }
     Ok(serde_json::Value::Object(map))
+}
+
+// Convert a kamadak-exif `Value` into the JSON shape downstream consumers
+// (notably tanuki's `parseImageTags`) expect: rationals as `[num, den]` so
+// GPS coordinates can be reconstructed, integers as JSON numbers, ASCII as
+// UTF-8 strings (lossy on non-UTF8 bytes). Single-element fields are kept
+// inside the array — callers handle both.
+fn exif_value_to_json(v: &exif::Value) -> serde_json::Value {
+    use serde_json::Number;
+    use serde_json::Value as J;
+    let from_f64 =
+        |n: f64| Number::from_f64(n).map(J::Number).unwrap_or(J::Null);
+    match v {
+        exif::Value::Byte(xs) => J::Array(xs.iter().map(|n| J::from(*n)).collect()),
+        exif::Value::SByte(xs) => J::Array(xs.iter().map(|n| J::from(*n)).collect()),
+        exif::Value::Short(xs) => J::Array(xs.iter().map(|n| J::from(*n)).collect()),
+        exif::Value::SShort(xs) => J::Array(xs.iter().map(|n| J::from(*n)).collect()),
+        exif::Value::Long(xs) => J::Array(xs.iter().map(|n| J::from(*n)).collect()),
+        exif::Value::SLong(xs) => J::Array(xs.iter().map(|n| J::from(*n)).collect()),
+        exif::Value::Float(xs) => {
+            J::Array(xs.iter().map(|n| from_f64(*n as f64)).collect())
+        }
+        exif::Value::Double(xs) => J::Array(xs.iter().map(|n| from_f64(*n)).collect()),
+        exif::Value::Rational(xs) => J::Array(
+            xs.iter()
+                .map(|r| J::Array(vec![J::from(r.num), J::from(r.denom)]))
+                .collect(),
+        ),
+        exif::Value::SRational(xs) => J::Array(
+            xs.iter()
+                .map(|r| J::Array(vec![J::from(r.num), J::from(r.denom)]))
+                .collect(),
+        ),
+        // EXIF ASCII is a sequence of NUL-separated byte strings. Decode each
+        // lossily so non-UTF8 bytes don't fail the whole response.
+        exif::Value::Ascii(parts) => J::Array(
+            parts
+                .iter()
+                .map(|bs| J::String(String::from_utf8_lossy(bs).into_owned()))
+                .collect(),
+        ),
+        // Undefined/Unknown carry opaque bytes; surface as a number array
+        // for completeness. Most consumers ignore these and read `description`.
+        exif::Value::Undefined(bs, _) => {
+            J::Array(bs.iter().map(|n| J::from(*n)).collect())
+        }
+        exif::Value::Unknown(_, _, _) => J::Null,
+    }
 }
 
 /// Extract the EXIF orientation value from the asset, if any.
@@ -1166,6 +1251,39 @@ mod async_tests {
     }
 
     #[actix_web::test]
+    async fn test_metadata_image_without_exif() {
+        // Write a tiny PNG (the image crate's PNG encoder emits no EXIF
+        // chunk) into the blob store, hit /metadata, then clean up. The
+        // fallback should populate PixelXDimension/PixelYDimension from the
+        // decoded header.
+        let dest = std::path::PathBuf::from(DEFAULT_ASSETS_PATH)
+            .join("2019-04-15/0830/dim-only.png");
+        let img = image::RgbImage::from_pixel(7, 11, image::Rgb([255, 0, 0]));
+        img.save(&dest).expect("write fixture PNG");
+        let app = test::init_service(
+            App::new().route("/metadata/{id}", web::get().to(get_metadata)),
+        )
+        .await;
+        // MjAxOS0wNC0xNS8wODMwL2RpbS1vbmx5LnBuZw is 2019-04-15/0830/dim-only.png
+        let uri = "/metadata/MjAxOS0wNC0xNS8wODMwL2RpbS1vbmx5LnBuZw";
+        let req = test::TestRequest::with_uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status();
+        let body = test::read_body(resp).await;
+        let _ = std::fs::remove_file(&dest);
+        assert_eq!(status.as_u16(), actix_web::http::StatusCode::OK);
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).expect("response is JSON");
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "PixelXDimension": { "description": "7 pixels", "value": [7] },
+                "PixelYDimension": { "description": "11 pixels", "value": [11] },
+            })
+        );
+    }
+
+    #[actix_web::test]
     async fn test_metadata_image() {
         // dcp_1069.jpg is a pre-staged Kodak DC280 sample with a rich EXIF
         // header at tests/blobs/2019-04-15/0830/dcp_1069.jpg.
@@ -1187,34 +1305,56 @@ mod async_tests {
             serde_json::from_slice(&body).expect("response is JSON");
         let obj = parsed.as_object().expect("metadata should be a JSON object");
 
-        // Spot-check stable EXIF fields. Values include surrounding quotes for
-        // ASCII strings and units for numeric tags because kamadak-exif's
-        // display_value() formats them that way.
+        // Spot-check stable EXIF fields. Each tag is an object with a
+        // `description` (the kamadak-exif display string, which wraps ASCII
+        // in literal quotes and appends units to numerics) and a `value`
+        // (the raw typed JSON: number arrays for integers/floats, [num,den]
+        // arrays for rationals, string arrays for ASCII).
+        let descr = |k: &str| -> Option<String> {
+            obj.get(k)
+                .and_then(|v| v.as_object())
+                .and_then(|m| m.get("description"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        let value = |k: &str| -> Option<&serde_json::Value> {
+            obj.get(k).and_then(|v| v.as_object()).and_then(|m| m.get("value"))
+        };
+        assert_eq!(descr("Make").as_deref(), Some("\"EASTMAN KODAK COMPANY\""));
         assert_eq!(
-            obj.get("Make").and_then(|v| v.as_str()),
-            Some("\"EASTMAN KODAK COMPANY\"")
-        );
-        assert_eq!(
-            obj.get("Model").and_then(|v| v.as_str()),
+            descr("Model").as_deref(),
             Some("\"KODAK DC280 ZOOM DIGITAL CAMERA\"")
         );
-        assert_eq!(
-            obj.get("DateTimeOriginal").and_then(|v| v.as_str()),
-            Some("2003-09-03 17:24:35")
+        assert_eq!(descr("DateTimeOriginal").as_deref(), Some("2003-09-03 17:24:35"));
+        assert_eq!(descr("ExposureTime").as_deref(), Some("1/125 s"));
+        assert_eq!(descr("FNumber").as_deref(), Some("f/9.5"));
+        assert_eq!(descr("PixelXDimension").as_deref(), Some("440 pixels"));
+        assert_eq!(descr("ColorSpace").as_deref(), Some("sRGB"));
+
+        // FNumber is a Rational; value should be a single [num, den] pair.
+        let fnum_v = value("FNumber").and_then(|v| v.as_array()).expect("FNumber value");
+        assert_eq!(fnum_v.len(), 1);
+        let pair = fnum_v[0].as_array().expect("[num, den]");
+        assert_eq!(pair.len(), 2);
+        assert!(pair[0].as_u64().is_some() && pair[1].as_u64().is_some());
+
+        // PixelXDimension is a Short/Long; value should be a single-element
+        // number array.
+        let pxw_v = value("PixelXDimension")
+            .and_then(|v| v.as_array())
+            .expect("PixelXDimension value");
+        assert_eq!(pxw_v.len(), 1);
+        assert!(pxw_v[0].as_u64().is_some());
+
+        // Make is ASCII; value should be a string array containing the make.
+        let make_v = value("Make").and_then(|v| v.as_array()).expect("Make value");
+        assert!(
+            make_v
+                .iter()
+                .any(|v| v.as_str() == Some("EASTMAN KODAK COMPANY")),
+            "Make value should contain the raw ASCII string, got {make_v:?}"
         );
-        assert_eq!(
-            obj.get("ExposureTime").and_then(|v| v.as_str()),
-            Some("1/125 s")
-        );
-        assert_eq!(obj.get("FNumber").and_then(|v| v.as_str()), Some("f/9.5"));
-        assert_eq!(
-            obj.get("PixelXDimension").and_then(|v| v.as_str()),
-            Some("440 pixels")
-        );
-        assert_eq!(
-            obj.get("ColorSpace").and_then(|v| v.as_str()),
-            Some("sRGB")
-        );
+
         // MakerNote and thumbnail-IFD entries must be stripped.
         assert!(!obj.contains_key("MakerNote"));
     }
