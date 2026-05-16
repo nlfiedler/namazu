@@ -70,7 +70,7 @@ fn is_video(filepath: &Path) -> bool {
         .map(|e| {
             matches!(
                 e.as_str(),
-                "mp4" | "mov" | "m4v" | "mkv" | "webm" | "avi" | "mpeg" | "mpg"
+                "mp4" | "mov" | "m4v" | "mkv" | "webm" | "avi" | "mpeg" | "mpg" | "qt"
             )
         })
         .unwrap_or(false)
@@ -777,6 +777,7 @@ mod tests {
         assert!(is_video(Path::new("clip.MOV")));
         assert!(is_video(Path::new("path/to/clip.webm")));
         assert!(is_video(Path::new("home.video.m4v")));
+        assert!(is_video(Path::new("clip.qt")));
         assert!(!is_video(Path::new("photo.jpg")));
         assert!(!is_video(Path::new("notes.txt")));
         assert!(!is_video(Path::new("noext")));
