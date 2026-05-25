@@ -13,3 +13,6 @@ healthcheck/target
 # temporary data
 tmp
 .tmp
+
+# ML model files fetched by build.rs from model-manifest.json
+/models/
