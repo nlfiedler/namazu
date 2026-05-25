@@ -14,6 +14,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+mod synthetic;
+
 #[cfg(test)]
 const DEFAULT_ASSETS_PATH: &str = "tests/blobs";
 #[cfg(not(test))]
@@ -29,7 +31,7 @@ fn has_control_chars(s: &str) -> bool {
 }
 
 /// Convert the identifier to a file path within the assets store.
-fn blob_path(encoded: &str) -> Result<PathBuf, Error> {
+pub(crate) fn blob_path(encoded: &str) -> Result<PathBuf, Error> {
     let decoded = general_purpose::URL_SAFE_NO_PAD.decode(encoded)?;
     // Windows will raise unexpected errors if the path has any trailing EOL
     // characters which is very easy to do with base64 encoding.
@@ -62,7 +64,7 @@ fn get_file_name(path: &Path) -> String {
 }
 
 /// True if the path's extension matches a recognized video container.
-fn is_video(filepath: &Path) -> bool {
+pub(crate) fn is_video(filepath: &Path) -> bool {
     filepath
         .extension()
         .and_then(|e| e.to_str())
@@ -414,7 +416,7 @@ fn exif_value_to_json(v: &exif::Value) -> serde_json::Value {
 }
 
 /// Extract the EXIF orientation value from the asset, if any.
-fn get_image_orientation(filepath: &Path) -> Result<u16, Error> {
+pub(crate) fn get_image_orientation(filepath: &Path) -> Result<u16, Error> {
     let file = std::fs::File::open(filepath)?;
     let mut buffer = std::io::BufReader::new(&file);
     let reader = exif::Reader::new();
@@ -431,7 +433,7 @@ fn get_image_orientation(filepath: &Path) -> Result<u16, Error> {
 /// Flip and/or rotate the image to have the correct rendering.
 ///
 /// The orientation value should be as read from the EXIF header.
-fn correct_orientation(orientation: u16, img: image::DynamicImage) -> image::DynamicImage {
+pub(crate) fn correct_orientation(orientation: u16, img: image::DynamicImage) -> image::DynamicImage {
     match orientation {
         2 => img.fliph(),
         3 => img.rotate180(),
@@ -724,10 +726,25 @@ async fn main() -> std::io::Result<()> {
     let host = env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_owned());
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_owned());
     let addr = format!("{}:{}", host, port);
+
+    let models_dir = synthetic::models_dir().unwrap_or_else(|e| {
+        log::error!("synthetic: {e}");
+        std::process::exit(1);
+    });
+    info!("synthetic: loading models from {}", models_dir.display());
+    let engine = match synthetic::SyntheticEngine::new(&models_dir) {
+        Ok(e) => web::Data::new(e),
+        Err(e) => {
+            log::error!("synthetic: failed to initialize engine: {e}");
+            std::process::exit(1);
+        }
+    };
+
     info!("listening on {}", addr);
     HttpServer::new(move || {
         App::new()
             .wrap(actix_web::middleware::Logger::default())
+            .app_data(engine.clone())
             .service(
                 web::resource("/liveness")
                     .route(web::get().to(HttpResponse::Ok))
@@ -742,6 +759,7 @@ async fn main() -> std::io::Result<()> {
             .route("/thumbnail/{w}/{h}/{id}", web::get().to(get_thumbnail))
             .route("/preview/{id}", web::get().to(get_preview))
             .route("/metadata/{id}", web::get().to(get_metadata))
+            .route("/synthetic/{id}", web::post().to(synthetic::post_synthetic))
             .route("/assets/{id}", web::get().to(get_asset))
             .route("/assets/{id}", web::head().to(get_asset))
             .route("/assets/{id}", web::put().to(put_asset))
