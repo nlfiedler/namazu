@@ -5,7 +5,9 @@
 //! curation pipeline; inference, the HTTP handler, and engine wiring land in
 //! subsequent slices.
 
+pub mod align;
 pub mod classifier;
+pub mod embedder;
 pub mod engine;
 pub mod face_detector;
 pub mod handler;

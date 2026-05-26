@@ -50,7 +50,7 @@ No body. No query parameters. The endpoint is idempotent: calling it twice produ
   "faces": [
     {
       "bbox": [x, y, w, h],
-      "embedding": "<base64-encoded little-endian Float32Array, 128 floats>",
+      "embedding": "<base64-encoded little-endian Float32Array, 512 floats>",
       "thumbnail": "<base64-encoded JPEG>",
       "score": 0.97,
       "model_version": "mobilefacenet-v1"
@@ -69,7 +69,7 @@ No body. No query parameters. The endpoint is idempotent: calling it twice produ
 - `labels[].name` — **curated display label** (post-mapping, see "Label vocabulary and curation" below). Lowercase English, may contain spaces (`"palm tree"`).
 - `labels[].score` — classifier confidence, `[0.0, 1.0]`. After de-duplication (multiple raw ImageNet labels collapsing to one display label), the surviving score is the maximum raw score among the merged entries.
 - `faces[].bbox` — `[x, y, width, height]` in **displayed-orientation** pixel coordinates of the source image (i.e. after applying EXIF orientation; see "Orientation" below). Floating-point allowed.
-- `faces[].embedding` — base64 of a raw little-endian `f32` array. **MobileFaceNet output: 128 floats = 512 bytes raw → ~684 bytes base64.** The vector **must be L2-normalized** so consumers can use cosine similarity by simple dot product.
+- `faces[].embedding` — base64 of a raw little-endian `f32` array. **MobileFaceNet output: 512 floats = 2048 bytes raw → ~2732 bytes base64.** The vector **must be L2-normalized** so consumers can use cosine similarity by simple dot product.
 - `faces[].thumbnail` — base64-encoded JPEG of the cropped, aligned face, **~128 px on the long edge** (target 128, accept ±32). The crop is the same aligned face that was fed to MobileFaceNet (5-point landmark warp to the standard ArcFace reference template), not just a raw bbox crop. JPEG quality ~85.
 - `faces[].score` — face detector confidence, `[0.0, 1.0]`.
 - `faces[].model_version` — the model that produced this embedding. Must agree with `model_versions.faces` (e.g. `mobilefacenet-v1`). Embeddings from different `model_version` values are not directly comparable.
@@ -186,9 +186,9 @@ Suggested Rust inference crates (pure-Rust, CPU-only):
 **The exact model files are fixed** — both Namazu and Tanuki's local detector must use the same ONNX files so that embeddings are byte-comparable across backends:
 
 - **Face detection**: `scrfd_2.5g.onnx` (~3 MB). Produces face bounding boxes and 5-point landmarks (left eye, right eye, nose tip, left mouth corner, right mouth corner).
-- **Face embedding**: `mobilefacenet.onnx` (~5 MB, ArcFace-trained). Produces 128-dimensional L2-normalized embeddings from aligned face crops.
+- **Face embedding**: `mobilefacenet.onnx` (~14 MB, ArcFace-trained). Produces 512-dimensional L2-normalized embeddings from aligned face crops.
 
-The pipeline per detected face is: SCRFD → 5 landmarks → affine warp to the standard ArcFace 112×112 reference template → MobileFaceNet → 128-dim embedding (L2-normalized).
+The pipeline per detected face is: SCRFD → 5 landmarks → affine warp to the standard ArcFace 112×112 reference template → MobileFaceNet → 512-dim embedding (L2-normalized).
 
 **SCRFD inference parameters** (InsightFace defaults — both backends agree):
 
@@ -291,7 +291,7 @@ Tests to add:
 - The face ONNX files are likewise shared with Tanuki and must match byte-for-byte across the two deployments to preserve cross-backend embedding compatibility. Tanuki repo will hold the canonical copies.
 - Document any new system packages required by the chosen inference crate. `tract` is pure-Rust and needs none; `ort` needs `libstdc++` and a recent `glibc`.
 - Update `Cargo.toml` with the chosen ML crates; rebuild verifies they link CPU-only.
-- The endpoint adds a meaningful steady-state memory baseline (model weights live in RAM). Expect ~40 MB extra resident memory total (MobileNetV2 ≈ 14 MB + SCRFD-2.5g ≈ 3 MB + MobileFaceNet ≈ 5 MB plus working buffers); document this in the README so operators are not surprised.
+- The endpoint adds a meaningful steady-state memory baseline (model weights live in RAM). Expect ~60 MB extra resident memory total (MobileNetV2 ≈ 14 MB + SCRFD-2.5g ≈ 3 MB + MobileFaceNet ≈ 14 MB plus the ORT runtime and per-request working buffers); document this in the README so operators are not surprised.
 
 ## Out-of-scope but worth flagging
 

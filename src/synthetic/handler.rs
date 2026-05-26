@@ -69,6 +69,14 @@ pub async fn post_synthetic(
                 "inference_failed",
             ))
         }
+        Err(ProcessError::ThumbnailEncode(e)) => {
+            warn!("synthetic thumbnail encode failed for {}: {e}", info);
+            Ok(error_response(
+                HttpResponse::InternalServerError(),
+                "could not encode face thumbnail",
+                "thumbnail_encode_failed",
+            ))
+        }
     }
 }
 
