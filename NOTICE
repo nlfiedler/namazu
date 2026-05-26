@@ -1,0 +1,40 @@
+Namazu
+======
+
+This software, when built with model artifacts fetched at compile time
+(see model-manifest.json), bundles third-party ONNX model files in its
+release artifacts. The model files themselves are not committed to this
+repository, but their upstream licenses still apply to any redistributed
+binary or Docker image that contains them.
+
+------------------------------------------------------------------------
+mobilenet_v2.onnx
+------------------------------------------------------------------------
+Upstream: ONNX Model Zoo
+          https://github.com/onnx/models
+License:  Apache License, Version 2.0
+          https://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------------
+scrfd_2.5g.onnx
+------------------------------------------------------------------------
+Upstream: InsightFace project
+          https://github.com/deepinsight/insightface
+License:  MIT License
+          https://opensource.org/license/mit
+
+------------------------------------------------------------------------
+mobilefacenet.onnx
+------------------------------------------------------------------------
+Upstream: InsightFace project
+          https://github.com/deepinsight/insightface
+License:  MIT License
+          https://opensource.org/license/mit
+
+------------------------------------------------------------------------
+labels-map.json
+------------------------------------------------------------------------
+A curated mapping from ImageNet-1000 class names to display labels.
+The canonical copy lives in the Tanuki repository
+(https://github.com/nlfiedler/tanuki) and is treated as part of the
+project's own source for licensing purposes.

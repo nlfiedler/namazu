@@ -122,3 +122,106 @@ fn is_image(path: &Path) -> bool {
         "jpg" | "jpeg" | "jpe" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::synthetic::{SyntheticEngine, models_dir};
+    use actix_web::{App, test};
+    use std::sync::{Arc, OnceLock};
+
+    /// Models load once per test process. The engine is shared via `Arc`
+    /// across all tests in this module; if the models directory isn't set
+    /// up yet the tests skip gracefully so `cargo test` works in
+    /// environments that haven't fetched weights.
+    fn shared_engine() -> Option<Arc<SyntheticEngine>> {
+        static CELL: OnceLock<Option<Arc<SyntheticEngine>>> = OnceLock::new();
+        CELL.get_or_init(|| {
+            let dir = models_dir().ok()?;
+            SyntheticEngine::new(&dir).ok().map(Arc::new)
+        })
+        .clone()
+    }
+
+    fn encode_id(rel: &str) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rel)
+    }
+
+    #[actix_web::test]
+    async fn unknown_blob_returns_404() {
+        let Some(engine) = shared_engine() else {
+            eprintln!("skip: models not present");
+            return;
+        };
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::from(engine))
+                .route("/synthetic/{id}", web::post().to(post_synthetic)),
+        )
+        .await;
+        let id = encode_id("does/not/exist.jpg");
+        let req = test::TestRequest::post()
+            .uri(&format!("/synthetic/{id}"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[actix_web::test]
+    async fn non_image_blob_returns_204() {
+        let Some(engine) = shared_engine() else {
+            eprintln!("skip: models not present");
+            return;
+        };
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::from(engine))
+                .route("/synthetic/{id}", web::post().to(post_synthetic)),
+        )
+        .await;
+        // Existing test blob: a plain-text file with no image extension.
+        let id = encode_id("2019-04-15/0830/lorem-ipsum.txt");
+        let req = test::TestRequest::post()
+            .uri(&format!("/synthetic/{id}"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 204);
+    }
+
+    #[actix_web::test]
+    async fn corrupt_jpeg_returns_400_decode_failed() {
+        let Some(engine) = shared_engine() else {
+            eprintln!("skip: models not present");
+            return;
+        };
+
+        // Stage a truncated JPEG in the cfg(test) assets root.
+        let rel = "synthetic-tests/0000/corrupt.jpg";
+        let abs = std::path::Path::new(crate::DEFAULT_ASSETS_PATH).join(rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        // Real JPEG SOI marker followed by garbage — passes the extension
+        // sniff but the `image` crate cannot decode it.
+        std::fs::write(&abs, b"\xFF\xD8\xFF\xE0not actually a jpeg").unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::from(engine))
+                .route("/synthetic/{id}", web::post().to(post_synthetic)),
+        )
+        .await;
+        let id = encode_id(rel);
+        let req = test::TestRequest::post()
+            .uri(&format!("/synthetic/{id}"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status();
+        let body = test::read_body(resp).await;
+
+        let _ = std::fs::remove_file(&abs);
+
+        assert_eq!(status, 400, "body={}", String::from_utf8_lossy(&body));
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["code"], "decode_failed");
+    }
+}

@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 mod synthetic;
 
 #[cfg(test)]
-const DEFAULT_ASSETS_PATH: &str = "tests/blobs";
+pub(crate) const DEFAULT_ASSETS_PATH: &str = "tests/blobs";
 #[cfg(not(test))]
 const DEFAULT_ASSETS_PATH: &str = "tmp/blobs";
 

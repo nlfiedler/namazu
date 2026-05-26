@@ -9,12 +9,17 @@ A simple blob server for use with [tanuki](https://github.com/nlfiedler/tanuki) 
 - Provides a `/thumbnail` endpoint for producing JPEG-formatted thumbnails of images.
 - Provides a `/preview` endpoint for producing JPEG previews constrained to a target displayed `width` or `height` (one or the other) in pixels, preserving aspect ratio.
 - Provides a `/metadata` endpoint for retrieving image and video metadata using an EXIF reader and `ffprobe` as appropriate.
+- Provides a `/synthetic` endpoint that runs ML inference (image classification + face detection + embeddings) on stored image blobs. See [doc/specs/0001-synthetic-data.md](doc/specs/0001-synthetic-data.md) for the contract.
 - Generates a unique `ETag` value and responds to `If-None-Match` with a 304 to support browser caching.
 - Supports `Range` request header and responds with a 206 which benefits browser requests for video files.
 
 ## Requirements
 
 To produce thumbnails and previews for video assets, `ffmpeg` will be invoked via a command shell.
+
+The synthetic-data endpoint requires four model artifacts (MobileNetV2, SCRFD-2.5g, MobileFaceNet, and a labels-map JSON) listed in `model-manifest.json`. `build.rs` downloads them from the Tanuki project's GitHub Releases at build time, into the `models/` directory at the repo root. The Docker build does this inside the builder stage; the resulting `models/` is copied into the final image.
+
+The synthetic endpoint adds about **~60 MB** of resident memory at steady state (model weights + the ORT runtime + per-request working buffers). On Linux the runtime needs `libgomp1` (already installed by the project Dockerfile).
 
 ## Configuration
 
@@ -26,6 +31,10 @@ To produce thumbnails and previews for video assets, `ffmpeg` will be invoked vi
   - Port number on which to listen for connections, defaults to `3000`
 - **RUST_LOG**
   - Value interpreted by `env_logger` to set logging levels. The basic levels are `error`, `warn`, `info`, `debug`, `trace`, and `off`.
+- **NAMAZU_MODELS_PATH**
+  - Override the directory that the synthetic-data endpoint reads ML model files from. Resolution order at startup is: this env var, then `<binary-dir>/models`, then `<repo>/models` (for `cargo run` / `cargo test`).
+- **NAMAZU_SKIP_MODEL_FETCH**
+  - Set to `1` at build time to make `build.rs` skip all network access. Files already present in `models/` are still SHA256-verified; missing files emit warnings instead of failing the build. Intended for offline development, sandboxed CI, and Docker builds that pre-stage `models/` by other means.
 
 ## Uploading files
 
