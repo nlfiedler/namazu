@@ -26,6 +26,11 @@ pub const LABEL_CAP: usize = 20;
 /// Spec-mandated cap on the faces list.
 pub const FACE_CAP: usize = 20;
 
+/// Spec-mandated cap on the total serialized response. If the response
+/// exceeds this after the count caps are applied, faces are dropped one at
+/// a time (lowest score first) until it fits.
+pub const RESPONSE_BYTE_CAP: usize = 1_000_000;
+
 /// JPEG quality for face thumbnails (~85 per spec).
 const THUMBNAIL_QUALITY: u8 = 85;
 
@@ -170,6 +175,26 @@ impl SyntheticEngine {
     }
 }
 
+/// Serialize the response, then trim faces (lowest score first) until the
+/// body fits under [`RESPONSE_BYTE_CAP`]. Sets `truncated = true` whenever
+/// any face is dropped here.
+///
+/// Labels are never dropped for size — only faces, per spec. If the body
+/// still exceeds the cap with zero faces, it is returned as-is; in
+/// practice the labels are small enough that this can't happen with
+/// well-formed input.
+pub fn encode_response(mut response: SyntheticResponse) -> Result<Vec<u8>, serde_json::Error> {
+    let mut body = serde_json::to_vec(&response)?;
+    while body.len() > RESPONSE_BYTE_CAP && !response.faces.is_empty() {
+        // Faces are sorted by descending score in `process()`, so the
+        // lowest-scoring entry is the last one.
+        response.faces.pop();
+        response.truncated = true;
+        body = serde_json::to_vec(&response)?;
+    }
+    Ok(body)
+}
+
 fn encode_embedding(v: &[f32]) -> String {
     let mut bytes = Vec::with_capacity(v.len() * 4);
     for &f in v {
@@ -185,4 +210,102 @@ fn encode_thumbnail(img: &RgbImage) -> Result<String, image::ImageError> {
         encoder.encode(img.as_raw(), img.width(), img.height(), ExtendedColorType::Rgb8)?;
     }
     Ok(BASE64.encode(&buf))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn versions() -> ModelVersions {
+        ModelVersions {
+            labels: LABELS_MODEL_VERSION.into(),
+            faces: FACES_MODEL_VERSION.into(),
+        }
+    }
+
+    fn face(score: f32, thumbnail_len: usize) -> Face {
+        Face {
+            bbox: [0.0, 0.0, 64.0, 64.0],
+            embedding: "ZW1iZWRkaW5n".repeat(200), // ~2.4 KB filler
+            thumbnail: "x".repeat(thumbnail_len),
+            score,
+            model_version: FACES_MODEL_VERSION.into(),
+        }
+    }
+
+    #[test]
+    fn small_response_is_passed_through_unchanged() {
+        let faces = (0..3)
+            .map(|i| face(0.9 - i as f32 * 0.1, 1_000))
+            .collect();
+        let resp = SyntheticResponse {
+            labels: vec![],
+            faces,
+            model_versions: versions(),
+            truncated: false,
+        };
+        let body = encode_response(resp).unwrap();
+        assert!(body.len() < RESPONSE_BYTE_CAP);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["faces"].as_array().unwrap().len(), 3);
+        assert_eq!(parsed["truncated"], false);
+    }
+
+    #[test]
+    fn drops_lowest_score_faces_until_under_cap() {
+        // 10 faces × ~200 KB thumbnail = ~2 MB raw, well over the 1 MB cap.
+        let faces: Vec<Face> = (0..10)
+            .map(|i| face(0.9 - i as f32 * 0.05, 200_000))
+            .collect();
+        let resp = SyntheticResponse {
+            labels: vec![],
+            faces,
+            model_versions: versions(),
+            truncated: false,
+        };
+        let body = encode_response(resp).unwrap();
+        assert!(
+            body.len() <= RESPONSE_BYTE_CAP,
+            "body {} bytes exceeded cap",
+            body.len()
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let remaining = parsed["faces"].as_array().unwrap();
+        assert!(remaining.len() < 10, "expected some faces dropped");
+        assert!(!remaining.is_empty(), "expected at least one face to fit");
+        assert_eq!(parsed["truncated"], true);
+        // Highest-scoring face must still be there (descending order kept).
+        let first_score = remaining[0]["score"].as_f64().unwrap();
+        assert!((first_score - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn returns_zero_faces_when_even_one_exceeds_cap() {
+        // Single face that's bigger than the cap on its own.
+        let faces = vec![face(0.95, RESPONSE_BYTE_CAP + 50_000)];
+        let resp = SyntheticResponse {
+            labels: vec![],
+            faces,
+            model_versions: versions(),
+            truncated: false,
+        };
+        let body = encode_response(resp).unwrap();
+        assert!(body.len() <= RESPONSE_BYTE_CAP);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["faces"].as_array().unwrap().len(), 0);
+        assert_eq!(parsed["truncated"], true);
+    }
+
+    #[test]
+    fn preserves_existing_truncated_flag_when_no_size_drops_needed() {
+        let resp = SyntheticResponse {
+            labels: vec![],
+            faces: vec![],
+            model_versions: versions(),
+            truncated: true, // e.g. labels were already over count cap
+        };
+        let body = encode_response(resp).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["truncated"], true);
+    }
 }

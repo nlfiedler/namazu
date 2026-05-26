@@ -7,7 +7,7 @@ use actix_web::{HttpResponse, web};
 use log::warn;
 use serde_json::json;
 
-use super::engine::{ProcessError, SyntheticEngine};
+use super::engine::{self, ProcessError, SyntheticEngine};
 use crate::{blob_path, is_video};
 
 pub async fn post_synthetic(
@@ -37,7 +37,7 @@ pub async fn post_synthetic(
         web::block(move || engine.process(&filepath_for_block)).await?;
 
     match result {
-        Ok(response) => match serde_json::to_vec(&response) {
+        Ok(response) => match engine::encode_response(response) {
             Ok(body) => Ok(HttpResponse::Ok().content_type("application/json").body(body)),
             Err(e) => {
                 warn!("serialize synthetic response failed: {e}");
