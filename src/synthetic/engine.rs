@@ -334,4 +334,35 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["truncated"], true);
     }
+
+    /// End-to-end label-pipeline integration: classification +
+    /// labels-map curation against a known image. Gated on models being
+    /// present so `cargo test` works on a fresh checkout that hasn't
+    /// fetched weights.
+    #[test]
+    fn one_dog_fixture_yields_dog_label() {
+        use crate::synthetic::models_dir;
+        let Ok(dir) = models_dir() else {
+            eprintln!("skip: no models directory resolved");
+            return;
+        };
+        let Ok(engine) = SyntheticEngine::new(&dir) else {
+            eprintln!("skip: engine init failed");
+            return;
+        };
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("one-dog.jpg");
+        if !fixture.exists() {
+            eprintln!("skip: {} not present", fixture.display());
+            return;
+        }
+        let response = engine.process(&fixture).expect("process");
+        let names: Vec<&str> = response.labels.iter().map(|l| l.name.as_str()).collect();
+        assert!(
+            names.contains(&"dog"),
+            "expected 'dog' among curated labels, got {names:?}"
+        );
+    }
 }
