@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
-use tract_onnx::prelude::tract_ndarray::Array4;
+use ndarray::Array4;
 
 use crate::{correct_orientation, get_image_orientation};
 

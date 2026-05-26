@@ -1,60 +1,53 @@
-//! MobileNetV2 inference wrapped around a tract typed runnable plan.
+//! MobileNetV2 inference via ONNX Runtime (`ort`).
 
 use std::path::Path;
+use std::sync::Mutex;
 
-use tract_onnx::prelude::*;
-
-use super::preprocess::CLASSIFIER_INPUT;
-
-type Plan = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+use ndarray::Array4;
+use ort::session::Session;
+use ort::value::Tensor;
 
 pub struct Classifier {
-    plan: Plan,
+    /// `Session::run()` takes `&mut self`, so we serialize access here.
+    /// ORT's intra-op parallelism keeps a single inference busy across all
+    /// cores, so serializing requests doesn't sacrifice throughput.
+    session: Mutex<Session>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
     #[error("load mobilenet_v2.onnx ({path}): {source}")]
-    Tract {
+    Ort {
         path: String,
         #[source]
-        source: TractError,
+        source: ort::Error,
     },
 }
 
 impl Classifier {
     pub fn load(path: &Path) -> Result<Self, LoadError> {
-        let map_err = |source| LoadError::Tract {
+        let map_err = |source| LoadError::Ort {
             path: path.display().to_string(),
             source,
         };
-        let plan = tract_onnx::onnx()
-            .model_for_path(path)
+        let session = Session::builder()
             .map_err(map_err)?
-            .with_input_fact(
-                0,
-                InferenceFact::dt_shape(
-                    f32::datum_type(),
-                    tvec!(1, 3, CLASSIFIER_INPUT, CLASSIFIER_INPUT),
-                ),
-            )
-            .map_err(map_err)?
-            .into_optimized()
-            .map_err(map_err)?
-            .into_runnable()
+            .commit_from_file(path)
             .map_err(map_err)?;
-        Ok(Self { plan })
+        Ok(Self {
+            session: Mutex::new(session),
+        })
     }
 
     /// Run inference and return softmax probabilities for the 1000 ImageNet
-    /// classes. The ONNX Model Zoo MobileNetV2 emits raw logits, so we apply
-    /// softmax here to get the `[0, 1]` scores the curation pipeline expects.
-    pub fn infer(&self, input: tract_ndarray::Array4<f32>) -> TractResult<Vec<f32>> {
-        let tensor: Tensor = input.into();
-        let result = self.plan.run(tvec!(tensor.into()))?;
-        let view = result[0].to_array_view::<f32>()?;
-        let logits: Vec<f32> = view.iter().copied().collect();
-        Ok(softmax(&logits))
+    /// classes. MobileNetV2 emits raw logits; we softmax here to get the
+    /// `[0, 1]` scores the curation pipeline expects.
+    pub fn infer(&self, input: Array4<f32>) -> ort::Result<Vec<f32>> {
+        let tensor = Tensor::from_array(input)?;
+        let mut session = self.session.lock().expect("classifier session poisoned");
+        let outputs = session.run(ort::inputs![tensor])?;
+        let (_shape, logits) = outputs[0].try_extract_tensor::<f32>()?;
+        Ok(softmax(logits))
     }
 }
 
@@ -80,7 +73,6 @@ mod tests {
         let p = softmax(&logits);
         let sum: f32 = p.iter().sum();
         assert!((sum - 1.0).abs() < 1e-6);
-        // index 2 (logit 3.0) should be the largest.
         let (idx, _) = p
             .iter()
             .enumerate()

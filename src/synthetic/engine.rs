@@ -12,6 +12,7 @@ use image::GenericImageView;
 use serde::Serialize;
 
 use super::classifier::{self, Classifier};
+use super::face_detector::{self, FaceDetector};
 use super::labels::{self, CurationResult, Label, LabelsMap};
 use super::preprocess;
 
@@ -33,6 +34,7 @@ const FACES_MODEL_VERSION: &str = "mobilefacenet-v1";
 pub struct SyntheticEngine {
     labels_map: Arc<LabelsMap>,
     classifier: Arc<Classifier>,
+    face_detector: Arc<FaceDetector>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +43,8 @@ pub enum InitError {
     LabelsMap(#[from] labels::LabelsMapError),
     #[error(transparent)]
     Classifier(#[from] classifier::LoadError),
+    #[error(transparent)]
+    FaceDetector(#[from] face_detector::LoadError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -50,7 +54,7 @@ pub enum ProcessError {
     #[error("image too large: {0}x{1}")]
     TooLarge(u32, u32),
     #[error("inference failed: {0}")]
-    Inference(#[source] tract_onnx::prelude::TractError),
+    Inference(#[source] ort::Error),
 }
 
 #[derive(Debug, Serialize)]
@@ -74,9 +78,11 @@ impl SyntheticEngine {
     pub fn new(models_dir: &Path) -> Result<Self, InitError> {
         let labels_map = LabelsMap::load(&models_dir.join("labels-map.json"))?;
         let classifier = Classifier::load(&models_dir.join("mobilenet_v2.onnx"))?;
+        let face_detector = FaceDetector::load(&models_dir.join("scrfd_2.5g.onnx"))?;
         Ok(Self {
             labels_map: Arc::new(labels_map),
             classifier: Arc::new(classifier),
+            face_detector: Arc::new(face_detector),
         })
     }
 
@@ -88,10 +94,10 @@ impl SyntheticEngine {
             return Err(ProcessError::TooLarge(w, h));
         }
 
-        let input = preprocess::classifier_input(&img);
+        let classifier_input = preprocess::classifier_input(&img);
         let probs = self
             .classifier
-            .infer(input)
+            .infer(classifier_input)
             .map_err(ProcessError::Inference)?;
         let scored: Vec<(u32, f32)> = probs
             .iter()
@@ -100,6 +106,18 @@ impl SyntheticEngine {
             .collect();
         let CurationResult { labels, truncated } =
             labels::curate(&scored, &self.labels_map, LABEL_CAP);
+
+        // Face detection runs but is not yet surfaced in the response; the
+        // alignment + embedding + thumbnail pieces land in the next slice.
+        let faces = self
+            .face_detector
+            .detect(&img)
+            .map_err(ProcessError::Inference)?;
+        log::info!(
+            "synthetic: detected {} face(s) in {}",
+            faces.len(),
+            image_path.display()
+        );
 
         Ok(SyntheticResponse {
             labels,

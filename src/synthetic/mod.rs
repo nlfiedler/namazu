@@ -7,6 +7,7 @@
 
 pub mod classifier;
 pub mod engine;
+pub mod face_detector;
 pub mod handler;
 pub mod labels;
 pub mod preprocess;
