@@ -4,10 +4,13 @@
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{DynamicImage, ExtendedColorType, GenericImageView, RgbImage, codecs::jpeg::JpegEncoder};
 use serde::Serialize;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::align;
 use super::classifier::{self, Classifier};
@@ -34,6 +37,9 @@ pub const RESPONSE_BYTE_CAP: usize = 1_000_000;
 /// JPEG quality for face thumbnails (~85 per spec).
 const THUMBNAIL_QUALITY: u8 = 85;
 
+/// Spec-mandated per-image processing timeout.
+pub const PROCESSING_TIMEOUT: Duration = Duration::from_secs(30);
+
 const LABELS_MODEL_VERSION: &str = "mobilenetv2-v1";
 const FACES_MODEL_VERSION: &str = "mobilefacenet-v1";
 
@@ -42,6 +48,11 @@ pub struct SyntheticEngine {
     classifier: Arc<Classifier>,
     face_detector: Arc<FaceDetector>,
     embedder: Arc<Embedder>,
+    /// Bounds concurrent inferences to the number of available cores so
+    /// requests queue async rather than piling up in the blocking thread
+    /// pool, where they would hold threads while contending for the model
+    /// session mutexes.
+    semaphore: Arc<Semaphore>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -103,12 +114,27 @@ impl SyntheticEngine {
         let classifier = Classifier::load(&models_dir.join("mobilenet_v2.onnx"))?;
         let face_detector = FaceDetector::load(&models_dir.join("scrfd_2.5g.onnx"))?;
         let embedder = Embedder::load(&models_dir.join("mobilefacenet.onnx"))?;
+        let permits = thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1);
         Ok(Self {
             labels_map: Arc::new(labels_map),
             classifier: Arc::new(classifier),
             face_detector: Arc::new(face_detector),
             embedder: Arc::new(embedder),
+            semaphore: Arc::new(Semaphore::new(permits)),
         })
+    }
+
+    /// Acquire an inference permit. The returned guard must be held for the
+    /// lifetime of the `process()` call (typically by moving it into the
+    /// `web::block` closure).
+    pub async fn acquire_permit(&self) -> OwnedSemaphorePermit {
+        self.semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("synthetic semaphore should never be closed")
     }
 
     /// Synchronous processing pipeline. Designed to run inside `web::block`.

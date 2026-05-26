@@ -31,10 +31,28 @@ pub async fn post_synthetic(
         return Ok(HttpResponse::NoContent().finish());
     }
 
-    let engine = engine.clone();
+    // Bound concurrent inferences and apply the 30s per-image timeout.
+    // The permit is moved into the blocking closure so it stays held for
+    // the full duration of inference, even if the awaiting future is
+    // dropped (e.g. on timeout) and ORT keeps chewing in the background.
+    let engine_for_block = engine.clone();
     let filepath_for_block = filepath.clone();
-    let result =
-        web::block(move || engine.process(&filepath_for_block)).await?;
+    let permit = engine.acquire_permit().await;
+    let block = web::block(move || {
+        let _permit = permit;
+        engine_for_block.process(&filepath_for_block)
+    });
+    let result = match tokio::time::timeout(engine::PROCESSING_TIMEOUT, block).await {
+        Ok(blocking_result) => blocking_result?,
+        Err(_elapsed) => {
+            warn!("synthetic inference timed out for {}", info);
+            return Ok(error_response(
+                HttpResponse::RequestTimeout(),
+                "processing exceeded timeout",
+                "timeout",
+            ));
+        }
+    };
 
     match result {
         Ok(response) => match engine::encode_response(response) {
