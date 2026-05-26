@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use image::{DynamicImage, GenericImageView, Rgb, RgbImage, imageops::FilterType};
+use image::{Rgb, RgbImage, imageops, imageops::FilterType};
 use ndarray::Array4;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -86,15 +86,16 @@ impl FaceDetector {
     }
 
     /// Run face detection on a displayed-orientation image.
-    pub fn detect(&self, img: &DynamicImage) -> ort::Result<Vec<DetectedFace>> {
+    ///
+    /// Takes a pre-converted `RgbImage` so the same buffer can be reused by
+    /// the classifier and alignment stages without re-running `to_rgb8()`.
+    pub fn detect(&self, img: &RgbImage) -> ort::Result<Vec<DetectedFace>> {
         let (w, h) = img.dimensions();
         let long_edge = w.max(h).max(1);
         let scale = INPUT_SIZE as f32 / long_edge as f32;
         let new_w = ((w as f32 * scale).round() as u32).min(INPUT_SIZE as u32).max(1);
         let new_h = ((h as f32 * scale).round() as u32).min(INPUT_SIZE as u32).max(1);
-        let resized = img
-            .resize_exact(new_w, new_h, FilterType::Triangle)
-            .to_rgb8();
+        let resized = imageops::resize(img, new_w, new_h, FilterType::Triangle);
 
         // Letterbox: top-left aligned, padded with zeros.
         let mut canvas =
@@ -157,10 +158,19 @@ impl FaceDetector {
                 }
             })
             .collect();
+        // Sort descending by score; tiebreak by larger bbox area so output
+        // is deterministic for fixture-based tests (per spec).
         out.sort_by(|a, b| {
+            let area_a = a.bbox[2] * a.bbox[3];
+            let area_b = b.bbox[2] * b.bbox[3];
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    area_b
+                        .partial_cmp(&area_a)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
         });
         Ok(out)
     }
@@ -177,6 +187,11 @@ struct RawDet {
 }
 
 /// Inspect session outputs and classify each by anchor count + last dim.
+///
+/// The expected anchor counts are derived from [`INPUT_SIZE`]. The
+/// `scrfd_2.5g.onnx` graph has a dynamic input (`[1, 3, ?, ?]`), but we always
+/// letterbox the source into 640×640 before inference. If `INPUT_SIZE` ever
+/// changes here, the layout discovery below has to change too.
 fn discover_outputs(session: &Session) -> Result<OutputLayout, LoadError> {
     let expected_n: [i64; 3] = STRIDES.map(|s| {
         let cells = (INPUT_SIZE / s) as i64;
@@ -407,7 +422,8 @@ mod tests {
         let img = image::ImageReader::open(&fixture)
             .expect("open fixture")
             .decode()
-            .expect("decode fixture");
+            .expect("decode fixture")
+            .to_rgb8();
         let faces = detector.detect(&img).expect("detect");
         eprintln!("detected {} face(s):", faces.len());
         for f in &faces {
@@ -439,7 +455,8 @@ mod tests {
         let img = image::ImageReader::open(&fixture)
             .expect("open fixture")
             .decode()
-            .expect("decode fixture");
+            .expect("decode fixture")
+            .to_rgb8();
         let faces = detector.detect(&img).expect("detect");
         assert!(
             faces.is_empty(),

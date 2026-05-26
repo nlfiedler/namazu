@@ -74,11 +74,17 @@ pub async fn post_synthetic(
                 "decode_failed",
             ))
         }
-        Err(ProcessError::TooLarge(w, h)) => Ok(error_response(
-            HttpResponse::PayloadTooLarge(),
-            &format!("image dimensions {w}x{h} exceed processing limit"),
-            "too_large",
-        )),
+        Err(ProcessError::TooLarge { width, height }) => {
+            let message = match (width, height) {
+                (Some(w), Some(h)) => format!("image dimensions {w}x{h} exceed processing limit"),
+                _ => "image dimensions exceed processing limit".to_string(),
+            };
+            Ok(error_response(
+                HttpResponse::PayloadTooLarge(),
+                &message,
+                "too_large",
+            ))
+        }
         Err(ProcessError::Inference(e)) => {
             warn!("synthetic inference failed for {}: {e}", info);
             Ok(error_response(

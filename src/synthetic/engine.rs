@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use image::{DynamicImage, ExtendedColorType, GenericImageView, RgbImage, codecs::jpeg::JpegEncoder};
+use image::{ExtendedColorType, RgbImage, codecs::jpeg::JpegEncoder};
 use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -70,9 +70,16 @@ pub enum InitError {
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
     #[error("could not decode image: {0}")]
-    Decode(#[from] image::ImageError),
-    #[error("image too large: {0}x{1}")]
-    TooLarge(u32, u32),
+    Decode(#[source] image::ImageError),
+    /// Image exceeded the processing limit. Dimensions are present when the
+    /// post-decode check rejected the image; they're `None` when the decoder
+    /// itself tripped its strict-limits guard (in which case we never saw a
+    /// fully decoded buffer).
+    #[error("image too large: {width:?}x{height:?}")]
+    TooLarge {
+        width: Option<u32>,
+        height: Option<u32>,
+    },
     #[error("inference failed: {0}")]
     Inference(#[source] ort::Error),
     #[error("thumbnail encode failed: {0}")]
@@ -98,7 +105,7 @@ pub struct Face {
     /// `[x, y, width, height]` in displayed-orientation pixel coordinates.
     pub bbox: [f32; 4],
     /// Base64 of the raw little-endian `f32` embedding produced by
-    /// MobileFaceNet (128 floats → 512 bytes raw → ~684 chars base64).
+    /// MobileFaceNet (512 floats → 2048 bytes raw → ~2732 chars base64).
     pub embedding: String,
     /// Base64-encoded JPEG of the aligned face crop.
     pub thumbnail: String,
@@ -139,14 +146,30 @@ impl SyntheticEngine {
 
     /// Synchronous processing pipeline. Designed to run inside `web::block`.
     pub fn process(&self, image_path: &Path) -> Result<SyntheticResponse, ProcessError> {
-        let img = preprocess::decode_oriented(image_path)?;
-        let (w, h) = img.dimensions();
+        let img = match preprocess::decode_oriented(image_path) {
+            Ok(img) => img,
+            // The decoder's strict dimension/alloc guards fired before any
+            // pixel buffer was allocated — convert that to TooLarge so the
+            // handler returns 413 rather than 400.
+            Err(image::ImageError::Limits(_)) => {
+                return Err(ProcessError::TooLarge {
+                    width: None,
+                    height: None,
+                });
+            }
+            Err(e) => return Err(ProcessError::Decode(e)),
+        };
+        let rgb = img.to_rgb8();
+        let (w, h) = rgb.dimensions();
         if w > MAX_DIM || h > MAX_DIM {
-            return Err(ProcessError::TooLarge(w, h));
+            return Err(ProcessError::TooLarge {
+                width: Some(w),
+                height: Some(h),
+            });
         }
 
         // Labels.
-        let classifier_input = preprocess::classifier_input(&img);
+        let classifier_input = preprocess::classifier_input(&rgb);
         let probs = self
             .classifier
             .infer(classifier_input)
@@ -164,12 +187,12 @@ impl SyntheticEngine {
         // Faces: detect → align → embed → thumbnail.
         let detected = self
             .face_detector
-            .detect(&img)
+            .detect(&rgb)
             .map_err(ProcessError::Inference)?;
         let face_truncated = detected.len() > FACE_CAP;
         let mut faces: Vec<Face> = Vec::with_capacity(detected.len().min(FACE_CAP));
         for det in detected.iter().take(FACE_CAP) {
-            faces.push(self.build_face(&img, det)?);
+            faces.push(self.build_face(&rgb, det)?);
         }
 
         Ok(SyntheticResponse {
@@ -183,7 +206,7 @@ impl SyntheticEngine {
         })
     }
 
-    fn build_face(&self, img: &DynamicImage, det: &DetectedFace) -> Result<Face, ProcessError> {
+    fn build_face(&self, img: &RgbImage, det: &DetectedFace) -> Result<Face, ProcessError> {
         let aligned = align::align_face(img, &det.landmarks);
         let embedding = self
             .embedder

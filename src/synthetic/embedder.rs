@@ -11,10 +11,11 @@ use ort::value::Tensor;
 
 use super::align::ALIGNED_SIZE;
 
-/// Output embedding dimensionality (per spec). Kept for documentation /
-/// future assertions; the runtime trusts whatever the model emits.
+/// Output embedding dimensionality for the current MobileFaceNet checkpoint
+/// (`mobilefacenet.onnx`, ArcFace-trained, 512-D). Kept for documentation;
+/// the runtime trusts whatever the model emits.
 #[allow(dead_code)]
-pub const EMBEDDING_DIM: usize = 128;
+pub const EMBEDDING_DIM: usize = 512;
 
 pub struct Embedder {
     /// `Session::run()` takes `&mut self`; ORT's intra-op parallelism keeps

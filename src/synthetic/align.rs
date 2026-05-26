@@ -18,7 +18,7 @@
 //! With five point pairs we have ten equations; the closed-form
 //! least-squares solution is what `similarity_transform` returns.
 
-use image::{DynamicImage, Rgb, RgbImage};
+use image::{Rgb, RgbImage};
 
 /// Edge of the aligned face (ArcFace standard).
 pub const ALIGNED_SIZE: u32 = 112;
@@ -69,14 +69,16 @@ pub fn similarity_transform(src: &[(f32, f32); 5]) -> (f32, f32, f32, f32) {
 /// Warp the source image into a 112×112 aligned face buffer using the
 /// inverse of the similarity transform from `landmarks` to the ArcFace
 /// template. Out-of-bounds samples come back black.
-pub fn align_face(img: &DynamicImage, landmarks: &[(f32, f32); 5]) -> RgbImage {
+///
+/// Takes a pre-converted `RgbImage` rather than a `DynamicImage` so callers
+/// can hoist the `to_rgb8()` conversion above the per-face loop.
+pub fn align_face(img: &RgbImage, landmarks: &[(f32, f32); 5]) -> RgbImage {
     let (a, b, c, d) = similarity_transform(landmarks);
     // Inverse of [[a -b][b a]] is (1/s²) * [[a b][-b a]], where s² = a² + b².
     let scale_sq = a * a + b * b;
     let inv = 1.0 / scale_sq;
 
-    let rgb = img.to_rgb8();
-    let (w, h) = rgb.dimensions();
+    let (w, h) = img.dimensions();
     let mut out = RgbImage::new(ALIGNED_SIZE, ALIGNED_SIZE);
 
     for py in 0..ALIGNED_SIZE {
@@ -85,18 +87,22 @@ pub fn align_face(img: &DynamicImage, landmarks: &[(f32, f32); 5]) -> RgbImage {
             let dy = py as f32 - d;
             let sx = inv * (a * dx + b * dy);
             let sy = inv * (-b * dx + a * dy);
-            out.put_pixel(px, py, sample_bilinear(&rgb, sx, sy, w, h));
+            out.put_pixel(px, py, sample_bilinear(img, sx, sy, w, h));
         }
     }
     out
 }
 
 fn sample_bilinear(img: &RgbImage, x: f32, y: f32, w: u32, h: u32) -> Rgb<u8> {
-    if !(0.0..=(w as f32 - 1.0)).contains(&x) || !(0.0..=(h as f32 - 1.0)).contains(&y) {
+    // Anything strictly outside `[0, w) × [0, h)` is treated as background.
+    // Inside that range we clamp the upper-neighbor index so samples whose
+    // fractional part lands in the last source pixel still produce a real
+    // color instead of a black halo.
+    if !(0.0..(w as f32)).contains(&x) || !(0.0..(h as f32)).contains(&y) {
         return Rgb([0, 0, 0]);
     }
-    let x0 = x.floor() as u32;
-    let y0 = y.floor() as u32;
+    let x0 = (x.floor() as u32).min(w - 1);
+    let y0 = (y.floor() as u32).min(h - 1);
     let x1 = (x0 + 1).min(w - 1);
     let y1 = (y0 + 1).min(h - 1);
     let dx = x - x0 as f32;
@@ -185,7 +191,7 @@ mod tests {
 
     #[test]
     fn align_face_produces_correct_size() {
-        let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(640, 480, Rgb([100, 150, 200])));
+        let img = RgbImage::from_pixel(640, 480, Rgb([100, 150, 200]));
         let landmarks = REFERENCE; // identity transform, but sampling will be out-of-bounds
         let aligned = align_face(&img, &landmarks);
         assert_eq!(aligned.dimensions(), (ALIGNED_SIZE, ALIGNED_SIZE));
