@@ -256,7 +256,12 @@ fn encode_thumbnail(img: &RgbImage) -> Result<String, image::ImageError> {
     let mut buf = Vec::new();
     {
         let mut encoder = JpegEncoder::new_with_quality(Cursor::new(&mut buf), THUMBNAIL_QUALITY);
-        encoder.encode(img.as_raw(), img.width(), img.height(), ExtendedColorType::Rgb8)?;
+        encoder.encode(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            ExtendedColorType::Rgb8,
+        )?;
     }
     Ok(BASE64.encode(&buf))
 }
@@ -284,9 +289,7 @@ mod tests {
 
     #[test]
     fn small_response_is_passed_through_unchanged() {
-        let faces = (0..3)
-            .map(|i| face(0.9 - i as f32 * 0.1, 1_000))
-            .collect();
+        let faces = (0..3).map(|i| face(0.9 - i as f32 * 0.1, 1_000)).collect();
         let resp = SyntheticResponse {
             labels: vec![],
             faces,

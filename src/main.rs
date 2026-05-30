@@ -96,7 +96,15 @@ fn extract_video_frame(filepath: &Path, vf: &str) -> Result<Vec<u8>, Error> {
         .arg("-i")
         .arg(filepath)
         .args([
-            "-frames:v", "1", "-vf", vf, "-f", "image2", "-vcodec", "mjpeg", "-",
+            "-frames:v",
+            "1",
+            "-vf",
+            vf,
+            "-f",
+            "image2",
+            "-vcodec",
+            "mjpeg",
+            "-",
         ])
         .output()
         .map_err(|e| {
@@ -331,7 +339,11 @@ struct MetadataTooLarge(usize);
 
 impl std::fmt::Display for MetadataTooLarge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "metadata exceeds {METADATA_MAX_BYTES} bytes (got {})", self.0)
+        write!(
+            f,
+            "metadata exceeds {METADATA_MAX_BYTES} bytes (got {})",
+            self.0
+        )
     }
 }
 
@@ -375,8 +387,7 @@ fn extract_image_metadata(file: std::fs::File) -> Result<serde_json::Value, Erro
 fn exif_value_to_json(v: &exif::Value) -> serde_json::Value {
     use serde_json::Number;
     use serde_json::Value as J;
-    let from_f64 =
-        |n: f64| Number::from_f64(n).map(J::Number).unwrap_or(J::Null);
+    let from_f64 = |n: f64| Number::from_f64(n).map(J::Number).unwrap_or(J::Null);
     match v {
         exif::Value::Byte(xs) => J::Array(xs.iter().map(|n| J::from(*n)).collect()),
         exif::Value::SByte(xs) => J::Array(xs.iter().map(|n| J::from(*n)).collect()),
@@ -384,9 +395,7 @@ fn exif_value_to_json(v: &exif::Value) -> serde_json::Value {
         exif::Value::SShort(xs) => J::Array(xs.iter().map(|n| J::from(*n)).collect()),
         exif::Value::Long(xs) => J::Array(xs.iter().map(|n| J::from(*n)).collect()),
         exif::Value::SLong(xs) => J::Array(xs.iter().map(|n| J::from(*n)).collect()),
-        exif::Value::Float(xs) => {
-            J::Array(xs.iter().map(|n| from_f64(*n as f64)).collect())
-        }
+        exif::Value::Float(xs) => J::Array(xs.iter().map(|n| from_f64(*n as f64)).collect()),
         exif::Value::Double(xs) => J::Array(xs.iter().map(|n| from_f64(*n)).collect()),
         exif::Value::Rational(xs) => J::Array(
             xs.iter()
@@ -408,9 +417,7 @@ fn exif_value_to_json(v: &exif::Value) -> serde_json::Value {
         ),
         // Undefined/Unknown carry opaque bytes; surface as a number array
         // for completeness. Most consumers ignore these and read `description`.
-        exif::Value::Undefined(bs, _) => {
-            J::Array(bs.iter().map(|n| J::from(*n)).collect())
-        }
+        exif::Value::Undefined(bs, _) => J::Array(bs.iter().map(|n| J::from(*n)).collect()),
         exif::Value::Unknown(_, _, _) => J::Null,
     }
 }
@@ -433,7 +440,10 @@ pub(crate) fn get_image_orientation(filepath: &Path) -> Result<u16, Error> {
 /// Flip and/or rotate the image to have the correct rendering.
 ///
 /// The orientation value should be as read from the EXIF header.
-pub(crate) fn correct_orientation(orientation: u16, img: image::DynamicImage) -> image::DynamicImage {
+pub(crate) fn correct_orientation(
+    orientation: u16,
+    img: image::DynamicImage,
+) -> image::DynamicImage {
     match orientation {
         2 => img.fliph(),
         3 => img.rotate180(),
@@ -568,8 +578,7 @@ async fn get_preview(
     let etag: header::EntityTag = header::EntityTag::new_strong(etag_value);
     if none_match(&etag, &req) {
         if let Ok(filepath) = blob_path(&identifier) {
-            let result =
-                web::block(move || create_preview(&filepath, width, height)).await?;
+            let result = web::block(move || create_preview(&filepath, width, height)).await?;
             match result {
                 Ok(data) => Ok(HttpResponse::Ok()
                     .content_type("image/jpeg")
@@ -1086,10 +1095,8 @@ mod async_tests {
 
     #[actix_web::test]
     async fn test_preview_bad_encoding() {
-        let app = test::init_service(
-            App::new().route("/preview/{id}", web::get().to(get_preview)),
-        )
-        .await;
+        let app =
+            test::init_service(App::new().route("/preview/{id}", web::get().to(get_preview))).await;
         let uri = "/preview/thisisnotbase64?height=300";
         let req = test::TestRequest::with_uri(uri).to_request();
         let resp = test::call_service(&app, req).await;
@@ -1102,10 +1109,8 @@ mod async_tests {
 
     #[actix_web::test]
     async fn test_preview_missing_dimensions() {
-        let app = test::init_service(
-            App::new().route("/preview/{id}", web::get().to(get_preview)),
-        )
-        .await;
+        let app =
+            test::init_service(App::new().route("/preview/{id}", web::get().to(get_preview))).await;
         // MjAxOS0wNC0xNS8wODMwL2ZpZ2h0aW5nX2tpdHRlbnMuanBn is 2019-04-15/0830/fighting_kittens.jpg
         let id = "MjAxOS0wNC0xNS8wODMwL2ZpZ2h0aW5nX2tpdHRlbnMuanBn";
 
@@ -1118,8 +1123,8 @@ mod async_tests {
         );
 
         // both width and height
-        let req =
-            test::TestRequest::with_uri(&format!("/preview/{id}?width=300&height=300")).to_request();
+        let req = test::TestRequest::with_uri(&format!("/preview/{id}?width=300&height=300"))
+            .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(
             resp.status().as_u16(),
@@ -1129,10 +1134,8 @@ mod async_tests {
 
     #[actix_web::test]
     async fn test_preview_missing_file() {
-        let app = test::init_service(
-            App::new().route("/preview/{id}", web::get().to(get_preview)),
-        )
-        .await;
+        let app =
+            test::init_service(App::new().route("/preview/{id}", web::get().to(get_preview))).await;
         // MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw== is 2019/08/17/0430/image.jpg
         let uri = "/preview/MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw?height=300";
         let req = test::TestRequest::with_uri(uri).to_request();
@@ -1146,10 +1149,8 @@ mod async_tests {
 
     #[actix_web::test]
     async fn test_preview_not_image() {
-        let app = test::init_service(
-            App::new().route("/preview/{id}", web::get().to(get_preview)),
-        )
-        .await;
+        let app =
+            test::init_service(App::new().route("/preview/{id}", web::get().to(get_preview))).await;
         // MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA== is 2019-04-15/0830/lorem-ipsum.txt
         let uri = "/preview/MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA?height=300";
         let req = test::TestRequest::with_uri(uri).to_request();
@@ -1163,10 +1164,8 @@ mod async_tests {
 
     #[actix_web::test]
     async fn test_preview_by_height() {
-        let app = test::init_service(
-            App::new().route("/preview/{id}", web::get().to(get_preview)),
-        )
-        .await;
+        let app =
+            test::init_service(App::new().route("/preview/{id}", web::get().to(get_preview))).await;
         // MjAxOS0wNC0xNS8wODMwL2ZpZ2h0aW5nX2tpdHRlbnMuanBn is 2019-04-15/0830/fighting_kittens.jpg
         let uri = "/preview/MjAxOS0wNC0xNS8wODMwL2ZpZ2h0aW5nX2tpdHRlbnMuanBn?height=300";
         let req = test::TestRequest::with_uri(uri).to_request();
@@ -1199,10 +1198,8 @@ mod async_tests {
 
     #[actix_web::test]
     async fn test_preview_by_width() {
-        let app = test::init_service(
-            App::new().route("/preview/{id}", web::get().to(get_preview)),
-        )
-        .await;
+        let app =
+            test::init_service(App::new().route("/preview/{id}", web::get().to(get_preview))).await;
         // MjAxOS0wNC0xNS8wODMwL2ZpZ2h0aW5nX2tpdHRlbnMuanBn is 2019-04-15/0830/fighting_kittens.jpg
         let uri = "/preview/MjAxOS0wNC0xNS8wODMwL2ZpZ2h0aW5nX2tpdHRlbnMuanBn?width=300";
         let req = test::TestRequest::with_uri(uri).to_request();
@@ -1219,10 +1216,9 @@ mod async_tests {
 
     #[actix_web::test]
     async fn test_metadata_bad_encoding() {
-        let app = test::init_service(
-            App::new().route("/metadata/{id}", web::get().to(get_metadata)),
-        )
-        .await;
+        let app =
+            test::init_service(App::new().route("/metadata/{id}", web::get().to(get_metadata)))
+                .await;
         let uri = "/metadata/thisisnotbase64";
         let req = test::TestRequest::with_uri(uri).to_request();
         let resp = test::call_service(&app, req).await;
@@ -1234,10 +1230,9 @@ mod async_tests {
 
     #[actix_web::test]
     async fn test_metadata_missing_file() {
-        let app = test::init_service(
-            App::new().route("/metadata/{id}", web::get().to(get_metadata)),
-        )
-        .await;
+        let app =
+            test::init_service(App::new().route("/metadata/{id}", web::get().to(get_metadata)))
+                .await;
         // MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw== is 2019/08/17/0430/image.jpg
         let uri = "/metadata/MjAxOS8wOC8xNy8wNDMwL2ltYWdlLmpwZw";
         let req = test::TestRequest::with_uri(uri).to_request();
@@ -1250,10 +1245,9 @@ mod async_tests {
 
     #[actix_web::test]
     async fn test_metadata_no_exif() {
-        let app = test::init_service(
-            App::new().route("/metadata/{id}", web::get().to(get_metadata)),
-        )
-        .await;
+        let app =
+            test::init_service(App::new().route("/metadata/{id}", web::get().to(get_metadata)))
+                .await;
         // MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA== is 2019-04-15/0830/lorem-ipsum.txt
         let uri = "/metadata/MjAxOS0wNC0xNS8wODMwL2xvcmVtLWlwc3VtLnR4dA";
         let req = test::TestRequest::with_uri(uri).to_request();
@@ -1264,8 +1258,7 @@ mod async_tests {
             "application/json"
         );
         let body = test::read_body(resp).await;
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&body).expect("response is JSON");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
         assert_eq!(parsed, serde_json::json!({}));
     }
 
@@ -1275,14 +1268,13 @@ mod async_tests {
         // chunk) into the blob store, hit /metadata, then clean up. The
         // fallback should populate PixelXDimension/PixelYDimension from the
         // decoded header.
-        let dest = std::path::PathBuf::from(DEFAULT_ASSETS_PATH)
-            .join("2019-04-15/0830/dim-only.png");
+        let dest =
+            std::path::PathBuf::from(DEFAULT_ASSETS_PATH).join("2019-04-15/0830/dim-only.png");
         let img = image::RgbImage::from_pixel(7, 11, image::Rgb([255, 0, 0]));
         img.save(&dest).expect("write fixture PNG");
-        let app = test::init_service(
-            App::new().route("/metadata/{id}", web::get().to(get_metadata)),
-        )
-        .await;
+        let app =
+            test::init_service(App::new().route("/metadata/{id}", web::get().to(get_metadata)))
+                .await;
         // MjAxOS0wNC0xNS8wODMwL2RpbS1vbmx5LnBuZw is 2019-04-15/0830/dim-only.png
         let uri = "/metadata/MjAxOS0wNC0xNS8wODMwL2RpbS1vbmx5LnBuZw";
         let req = test::TestRequest::with_uri(uri).to_request();
@@ -1291,8 +1283,7 @@ mod async_tests {
         let body = test::read_body(resp).await;
         let _ = std::fs::remove_file(&dest);
         assert_eq!(status.as_u16(), actix_web::http::StatusCode::OK);
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&body).expect("response is JSON");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
         assert_eq!(
             parsed,
             serde_json::json!({
@@ -1306,10 +1297,9 @@ mod async_tests {
     async fn test_metadata_image() {
         // dcp_1069.jpg is a pre-staged Kodak DC280 sample with a rich EXIF
         // header at tests/blobs/2019-04-15/0830/dcp_1069.jpg.
-        let app = test::init_service(
-            App::new().route("/metadata/{id}", web::get().to(get_metadata)),
-        )
-        .await;
+        let app =
+            test::init_service(App::new().route("/metadata/{id}", web::get().to(get_metadata)))
+                .await;
         // MjAxOS0wNC0xNS8wODMwL2RjcF8xMDY5LmpwZw is 2019-04-15/0830/dcp_1069.jpg
         let uri = "/metadata/MjAxOS0wNC0xNS8wODMwL2RjcF8xMDY5LmpwZw";
         let req = test::TestRequest::with_uri(uri).to_request();
@@ -1320,9 +1310,10 @@ mod async_tests {
             "application/json"
         );
         let body = test::read_body(resp).await;
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&body).expect("response is JSON");
-        let obj = parsed.as_object().expect("metadata should be a JSON object");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+        let obj = parsed
+            .as_object()
+            .expect("metadata should be a JSON object");
 
         // Spot-check stable EXIF fields. Each tag is an object with a
         // `description` (the kamadak-exif display string, which wraps ASCII
@@ -1337,21 +1328,28 @@ mod async_tests {
                 .map(str::to_string)
         };
         let value = |k: &str| -> Option<&serde_json::Value> {
-            obj.get(k).and_then(|v| v.as_object()).and_then(|m| m.get("value"))
+            obj.get(k)
+                .and_then(|v| v.as_object())
+                .and_then(|m| m.get("value"))
         };
         assert_eq!(descr("Make").as_deref(), Some("\"EASTMAN KODAK COMPANY\""));
         assert_eq!(
             descr("Model").as_deref(),
             Some("\"KODAK DC280 ZOOM DIGITAL CAMERA\"")
         );
-        assert_eq!(descr("DateTimeOriginal").as_deref(), Some("2003-09-03 17:24:35"));
+        assert_eq!(
+            descr("DateTimeOriginal").as_deref(),
+            Some("2003-09-03 17:24:35")
+        );
         assert_eq!(descr("ExposureTime").as_deref(), Some("1/125 s"));
         assert_eq!(descr("FNumber").as_deref(), Some("f/9.5"));
         assert_eq!(descr("PixelXDimension").as_deref(), Some("440 pixels"));
         assert_eq!(descr("ColorSpace").as_deref(), Some("sRGB"));
 
         // FNumber is a Rational; value should be a single [num, den] pair.
-        let fnum_v = value("FNumber").and_then(|v| v.as_array()).expect("FNumber value");
+        let fnum_v = value("FNumber")
+            .and_then(|v| v.as_array())
+            .expect("FNumber value");
         assert_eq!(fnum_v.len(), 1);
         let pair = fnum_v[0].as_array().expect("[num, den]");
         assert_eq!(pair.len(), 2);
@@ -1366,7 +1364,9 @@ mod async_tests {
         assert!(pxw_v[0].as_u64().is_some());
 
         // Make is ASCII; value should be a string array containing the make.
-        let make_v = value("Make").and_then(|v| v.as_array()).expect("Make value");
+        let make_v = value("Make")
+            .and_then(|v| v.as_array())
+            .expect("Make value");
         assert!(
             make_v
                 .iter()
@@ -1395,10 +1395,9 @@ mod async_tests {
         }
         // ooo_tracks.mp4 is a pre-staged H.264 sample at
         // tests/blobs/2019-04-15/0830/ooo_tracks.mp4.
-        let app = test::init_service(
-            App::new().route("/metadata/{id}", web::get().to(get_metadata)),
-        )
-        .await;
+        let app =
+            test::init_service(App::new().route("/metadata/{id}", web::get().to(get_metadata)))
+                .await;
         // MjAxOS0wNC0xNS8wODMwL29vb190cmFja3MubXA0 is 2019-04-15/0830/ooo_tracks.mp4
         let uri = "/metadata/MjAxOS0wNC0xNS8wODMwL29vb190cmFja3MubXA0";
         let req = test::TestRequest::with_uri(uri).to_request();
@@ -1409,8 +1408,7 @@ mod async_tests {
             "application/json"
         );
         let body = test::read_body(resp).await;
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&body).expect("response is JSON");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
 
         // Spot-check stable fields from ffprobe's -show_format / -show_streams
         // output. Numeric video properties surface as JSON numbers, while

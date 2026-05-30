@@ -201,7 +201,13 @@ mod tests {
     fn drops_scores_below_floor() {
         let m = map(&[(1, Some("dog"), "animal"), (2, Some("cat"), "animal")]);
         let r = curate(&[(1, 0.04), (2, 0.5)], &m, 20);
-        assert_eq!(r.labels, vec![Label { name: "cat".into(), score: 0.5 }]);
+        assert_eq!(
+            r.labels,
+            vec![Label {
+                name: "cat".into(),
+                score: 0.5
+            }]
+        );
         assert!(!r.truncated);
     }
 
@@ -209,7 +215,13 @@ mod tests {
     fn drops_null_labels() {
         let m = map(&[(1, None, "object"), (2, Some("car"), "vehicle")]);
         let r = curate(&[(1, 0.9), (2, 0.4)], &m, 20);
-        assert_eq!(r.labels, vec![Label { name: "car".into(), score: 0.4 }]);
+        assert_eq!(
+            r.labels,
+            vec![Label {
+                name: "car".into(),
+                score: 0.4
+            }]
+        );
     }
 
     #[test]
@@ -219,7 +231,13 @@ mod tests {
             (2, Some("baseball"), "sport"),
         ]);
         let r = curate(&[(1, 0.95), (2, 0.6)], &m, 20);
-        assert_eq!(r.labels, vec![Label { name: "baseball".into(), score: 0.6 }]);
+        assert_eq!(
+            r.labels,
+            vec![Label {
+                name: "baseball".into(),
+                score: 0.6
+            }]
+        );
     }
 
     #[test]
@@ -230,7 +248,13 @@ mod tests {
             (3, Some("bird"), "animal"),
         ]);
         let r = curate(&[(1, 0.3), (2, 0.7), (3, 0.5)], &m, 20);
-        assert_eq!(r.labels, vec![Label { name: "bird".into(), score: 0.7 }]);
+        assert_eq!(
+            r.labels,
+            vec![Label {
+                name: "bird".into(),
+                score: 0.7
+            }]
+        );
     }
 
     #[test]
@@ -244,9 +268,18 @@ mod tests {
         assert_eq!(
             r.labels,
             vec![
-                Label { name: "monkey".into(), score: 0.9 },
-                Label { name: "apple".into(), score: 0.5 },
-                Label { name: "zebra".into(), score: 0.5 },
+                Label {
+                    name: "monkey".into(),
+                    score: 0.9
+                },
+                Label {
+                    name: "apple".into(),
+                    score: 0.5
+                },
+                Label {
+                    name: "zebra".into(),
+                    score: 0.5
+                },
             ]
         );
     }
@@ -256,12 +289,10 @@ mod tests {
         let entries: Vec<_> = (0u32..30)
             .map(|i| (i, Some(format!("label{i:02}")), "object".to_string()))
             .collect();
-        let m = map(
-            &entries
-                .iter()
-                .map(|(k, l, c)| (*k, l.as_deref(), c.as_str()))
-                .collect::<Vec<_>>(),
-        );
+        let m = map(&entries
+            .iter()
+            .map(|(k, l, c)| (*k, l.as_deref(), c.as_str()))
+            .collect::<Vec<_>>());
         let raw: Vec<(u32, f32)> = (0u32..30).map(|i| (i, 0.5 + (i as f32) * 0.01)).collect();
         let r = curate(&raw, &m, 20);
         assert_eq!(r.labels.len(), 20);
@@ -274,7 +305,13 @@ mod tests {
     fn unknown_class_indices_are_silently_dropped() {
         let m = map(&[(1, Some("dog"), "animal")]);
         let r = curate(&[(1, 0.6), (999, 0.9)], &m, 20);
-        assert_eq!(r.labels, vec![Label { name: "dog".into(), score: 0.6 }]);
+        assert_eq!(
+            r.labels,
+            vec![Label {
+                name: "dog".into(),
+                score: 0.6
+            }]
+        );
     }
 
     /// Smoke test against the real downloaded labels-map.json if present.

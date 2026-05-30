@@ -93,13 +93,16 @@ impl FaceDetector {
         let (w, h) = img.dimensions();
         let long_edge = w.max(h).max(1);
         let scale = INPUT_SIZE as f32 / long_edge as f32;
-        let new_w = ((w as f32 * scale).round() as u32).min(INPUT_SIZE as u32).max(1);
-        let new_h = ((h as f32 * scale).round() as u32).min(INPUT_SIZE as u32).max(1);
+        let new_w = ((w as f32 * scale).round() as u32)
+            .min(INPUT_SIZE as u32)
+            .max(1);
+        let new_h = ((h as f32 * scale).round() as u32)
+            .min(INPUT_SIZE as u32)
+            .max(1);
         let resized = imageops::resize(img, new_w, new_h, FilterType::Triangle);
 
         // Letterbox: top-left aligned, padded with zeros.
-        let mut canvas =
-            RgbImage::from_pixel(INPUT_SIZE as u32, INPUT_SIZE as u32, Rgb([0, 0, 0]));
+        let mut canvas = RgbImage::from_pixel(INPUT_SIZE as u32, INPUT_SIZE as u32, Rgb([0, 0, 0]));
         for (x, y, px) in resized.enumerate_pixels() {
             canvas.put_pixel(x, y, *px);
         }
@@ -122,8 +125,7 @@ impl FaceDetector {
                 outputs[self.layout.score[i]].try_extract_tensor::<f32>()?;
             let (bbox_shape, bbox_data) =
                 outputs[self.layout.bbox[i]].try_extract_tensor::<f32>()?;
-            let (kps_shape, kps_data) =
-                outputs[self.layout.kps[i]].try_extract_tensor::<f32>()?;
+            let (kps_shape, kps_data) = outputs[self.layout.kps[i]].try_extract_tensor::<f32>()?;
             decode_stride(
                 stride,
                 score_shape,
@@ -409,7 +411,10 @@ mod tests {
     fn detects_faces_in_several_people_fixture() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let model = manifest.join("models").join("scrfd_2.5g.onnx");
-        let fixture = manifest.join("tests").join("fixtures").join("several-people.jpg");
+        let fixture = manifest
+            .join("tests")
+            .join("fixtures")
+            .join("several-people.jpg");
         if !model.exists() {
             eprintln!("skip: {} not present", model.display());
             return;

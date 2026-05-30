@@ -56,7 +56,9 @@ pub async fn post_synthetic(
 
     match result {
         Ok(response) => match engine::encode_response(response) {
-            Ok(body) => Ok(HttpResponse::Ok().content_type("application/json").body(body)),
+            Ok(body) => Ok(HttpResponse::Ok()
+                .content_type("application/json")
+                .body(body)),
             Err(e) => {
                 warn!("serialize synthetic response failed: {e}");
                 Ok(error_response(

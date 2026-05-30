@@ -79,8 +79,7 @@ mod tests {
     fn env_var_takes_precedence_and_is_trusted_as_is() {
         // Even pointed at a path that doesn't exist on disk; resolution
         // returns it unchanged. The engine will report a clear error later.
-        let got =
-            resolve_models_dir(Some("/no/such/dir".into()), None, Path::new("/tmp")).unwrap();
+        let got = resolve_models_dir(Some("/no/such/dir".into()), None, Path::new("/tmp")).unwrap();
         assert_eq!(got, PathBuf::from("/no/such/dir"));
     }
 
@@ -98,8 +97,7 @@ mod tests {
         let exe_tmp = tempdir();
         let manifest_tmp = tempdir();
         fs::create_dir(manifest_tmp.path().join("models")).unwrap();
-        let got =
-            resolve_models_dir(None, Some(exe_tmp.path()), manifest_tmp.path()).unwrap();
+        let got = resolve_models_dir(None, Some(exe_tmp.path()), manifest_tmp.path()).unwrap();
         assert_eq!(got, manifest_tmp.path().join("models"));
     }
 

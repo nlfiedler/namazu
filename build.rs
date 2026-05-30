@@ -50,8 +50,7 @@ fn run() -> Result<(), String> {
         serde_json::from_str(&raw).map_err(|e| format!("parse {MANIFEST_FILE}: {e}"))?;
 
     let models_dir = PathBuf::from(MODELS_DIR);
-    fs::create_dir_all(&models_dir)
-        .map_err(|e| format!("create {}: {e}", models_dir.display()))?;
+    fs::create_dir_all(&models_dir).map_err(|e| format!("create {}: {e}", models_dir.display()))?;
 
     let skip_fetch = std::env::var(SKIP_ENV).map(|v| v == "1").unwrap_or(false);
     if skip_fetch {
@@ -99,7 +98,10 @@ fn process_entry(entry: &FileEntry, models_dir: &Path, skip_fetch: bool) -> Resu
         let _ = fs::remove_file(&dest);
         format!("{}: downloaded file failed verification: {why}", entry.name)
     })?;
-    println!("cargo:warning={}: downloaded ({} bytes)", entry.name, entry.bytes);
+    println!(
+        "cargo:warning={}: downloaded ({} bytes)",
+        entry.name, entry.bytes
+    );
     Ok(())
 }
 
@@ -142,8 +144,7 @@ fn download(entry: &FileEntry, dest: &Path) -> Result<(), String> {
         .map_err(|e| format!("{}: GET {} failed: {e}", entry.name, entry.url))?;
 
     let mut reader = resp.into_reader();
-    let mut out =
-        fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    let mut out = fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     let mut total: u64 = 0;
